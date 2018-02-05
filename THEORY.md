@@ -1,4 +1,4 @@
-## Inspirationm
+## Inspiration
 - https://azure.microsoft.com/en-us/services/key-vault/
 - https://cloud.google.com/kms/
 - https://www.vaultproject.io
