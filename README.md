@@ -19,6 +19,7 @@ You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in 
         
 ## Keys and Secrets
 A key is identified by an key identifier. A secret is identified by a secret identifier, and associated with 0 or more properties. A secret property is associated with a value.
+KMS is encrypting keys and secrets using the [AES-256 cipher](https://en.wikipedia.org/wiki/Advanced_Encryption_Standard), and the initialization vector for each key and secret is derived from its name.
     
         
 ## Operation and Requirements    
@@ -95,16 +96,15 @@ You cannot use it set or access secrets before you unlock it.
 Accepting connections at https://0.0.0.0:8282
 ```
 
-KMS is now running in unsealed state. To unseal it, using the root token provided during initialisation: 
+KMS is now running in unsealed state. To unseal it:
 
 ```bash
 curl -X POST "https://localhost:8282/unseal" -k \
--H "Authorization: KMS iiBcRkH4OuardHV9l2JfmxLZiP24MtB513+0AJySKa35GdUymPzO7WT1G3Nkxmwt" \
 -d 'AQyfyiCT12bfu80igtyKe/cjk1J46121Vq1/8TtwS3mf/prQqpvkLJ4DwOK6+U1ebIXjOjBgVza908tg5kiVWuIKloeeHoUdBfLXDpZDDR2BKKdiKOKl3y0W85aU2HRxNLSlozfojdllw/RTDI+tlIU=
 Atyq5+yhUFDyxCqUHvIXwe0JJ+VywG81xQW69Atge5YK/prQqpvkLJ4DwOK6+U1ebIXjOjBgVza908tg5kiVWuIKloeeHoUdBfLXDpZDDR2BKKdiKOKl3y0W85aU2HRxNLSlozfojdllw/RTDI+tlIU=
 A67zRZePlFN40d6kFdm4TYzc5Lm6IeZksitTV4eZMaBw/prQqpvkLJ4DwOK6+U1ebIXjOjBgVza908tg5kiVWuIKloeeHoUdBfLXDpZDDR2BKKdiKOKl3y0W85aU2HRxNLSlozfojdllw/RTDI+tlIU='
 ```
-Notice how we used the Authorization HTTP header with the root token, and how we used 3 of the seals. In actual use cases, a single operator shouldn't have access to as many shares are required to reconstruct the master key. For this example, we assume that you do, for the sake of the tutorial.
+Notice how we used 3 of the seals. In actual use cases, a single operator shouldn't have access to as many shares are required to reconstruct the master key. For this example, we assume that you do, for the sake of the tutorial.
 
 If you have done this correctly, KMS will output `KMS unlocked` in standard output.
 
@@ -183,6 +183,7 @@ Expects a token in the request content payload. It will delete that token. It wi
 - `/unseal` 
 It expects 0 or more master key seals, one per line. It will verify the seals, and if enough shares have been collected, it will try to unseal KMS. If it doesn't succeed, it will reset the number of seals collected.
 If KMS is unsealed, the response will be "KMS is now UNLOCKED", otherwise, you will get a JSON dictionary with "cnt" as the total shares collected, and "required" as the number of shares required to reconstruct the master key.
+unseal does not require authentication with a token.
 
 - `/get_keys` 
 Expects 0 or more key identifiers, one per line. KMS will return `<key identifier><space><base64 representation of the key>`  for each such identifier in the response.
