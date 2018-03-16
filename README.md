@@ -7,8 +7,8 @@ Phaistos KMS is a very simple to operate, high performance, stateless keys and s
                                         
 KMS is inspired by Google KMS, AWS KMS and Hashicorp's Vault.
 
-# Building KMS
-You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in a few seconds. The KMS in this repository uses
+## Building KMS
+You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in a few seconds. The KMS in this repository uses:
 - https://github.com/dsprenkels/sss
 - https://github.com/nlohmann/json
 - https://github.com/Cyan4973/xxHash
@@ -16,11 +16,11 @@ You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in 
 
         
         
-# Keys and Secrets
+## Keys and Secrets
 A key is identified by an key identifier. A secret is identified by a secret identifier, and associated with 0 or more properties. A secret property is associated with a value.
     
         
-# Operation and Requirements    
+## Operation and Requirements    
 KMS requires root access. 
 The KMS binary permissions must be 0700 (only owner can read, write, and execute). KMS will not run unless the permissions are correct. It also requires a certificate(crts/crt.pem) and its matching private key(crts/key.pem), owned by root with access permissions set to 0700.
 You can create a self-signed certificate, or obtain one from a CA.
@@ -37,14 +37,14 @@ The only configuration option currently supported is `persist.mysql.endpoint`. Y
 The mySQL endpoint format is  `user[:password@]hostname[:port]/databasename`. That is to say, password and port are optional, but I strongly suggest that you configure (user, password) based authentication for KMS mySQL tables. If port is not specified, port is assumed to be 3306.
                         
                                 
-# Master Key and Shares         
+## Master Key and Shares         
 When KMS starts, it is in a `sealed state`. The only operation possible while in this state is `/unseal`. KMS cannot decrypt any information persisted unless unsealed first. Unsealing requires reconstruction of the `Master Key`, which in turn is used to decrypt a special KMS key, which is used to encrypt and decrypt keys and secrets. The master keys is not stored anywhere. It can only be derived from the master key shares. As opposed to creating a single master key and trusting a single operator with that key, KMS uses [Shamir's Secret Sharing algorithm](https://en.wikipedia.org/wiki/Shamir%27s_Secret_Sharing) to split the master created during initialisation into 1 or more shares, and trusted operators get exclusive ownership of those shares. Later, to unseal KMS, operators provide shares, in any order, and KMS, once it has enough shares, will reconstruct the master key, and transition to `unsealed` state.
                                 
-# Initialisation                
+## Initialisation                
 To initialise KMS, which can only be done once, you need to use `kms init <number of shares> <required shares to reconstruct the master key>`. A new master key is created, and then split into the number of shares you specified. KMS will initialise the database, and will then output the shares on screen, as well as a special `root authentication token`. You should then distribute the shares to trusted parties, and store the root token for later use (you should use 1Password or other such utilities to store the shares trusted to you, and the root token). Once KMS is initialised, you will not be able to reinitialise it.
 
 
-# Example: initialising KMS
+## Example: initialising KMS
 Create the required mySQL tables.
 ```bash
 mysql -h <mysql_host> -u <mysql_username> --password=<mysql_password> -A <mysql_database>
@@ -109,26 +109,26 @@ If you have done this correctly, KMS will output `KMS unlocked` in standard outp
 
 
 
-# Running KMS
+## Running KMS
 Run `kms -l <listen address>`. The listen address can be :port, or address:port, to listen to a specific address. You can also use `-f <configuration file path>` to specify the mySQL endpoint in there, otherwise you will be prompted for the mySQL endpoint.
 
 You should unseal the KMS instance for clients to be able to access it. KMS will accept HTTPS connections at the specified listen address.
 
-# Requests Authentication and Authorization
+## Requests Authentication and Authorization
 All HTTP requests require authentication. To authenticate an HTTPS request, you need to use the `Authorization` HTTP header, using the `KMS` realm and the token, like so:
 ```
 Authorization: KMS token
 ```
 Almost all requests require authorization. When KMS is initialised, a special root token is created. That is the only token that can be used to access everything, and to create new tokens. To create a new token, you need to use the `/create_token` API.
 
-# Keys and Secrets identifiers
+## Keys and Secrets identifiers
 A key or secret identifier is represented as a path with a "/" delimiter, and cannot be longer than 64 characters in length. 
 Examples of key or secret identifiers:
 - users/mail/100
 - products/video_games/ps4/150
 
 
-# API
+## API
 Almost all requests require authentication using Authorization HTTP header, and almost all of them should be POST requests. Any exceptions will be noted here.
 
 - `/create_token`  
@@ -146,10 +146,10 @@ The JSON dictionary structure should be as follows:
    "expires": unixTimestamp
 }
 ```
-where name is the name of token, for example, "application servers token", expires is the expiration date(number) expressed as a unix timestamp, and domains is an array of 1 or more domains. The domain is should have a trailing "/" An example of a domain is "users/", another example is "users/mail/".  Permissions is a string and can contain "r" or "r" characters. "r" enables read and "w" enables write, for the specified domain.
+where name is the name of token, for example, "application servers token", expires is the expiration date(number) expressed as a unix timestamp, and domains is an array of 1 or more domains. The domain is should have a trailing "/" An example of a domain is "users/", another example is "users/mail/".  Permissions is a string and can contain "r" or "w" characters. "r" enables read and "w" enables write, for the specified domain.
 KMS will register the new token and will return the token identifier you can use from now on to authenticate HTTP requests.
  
- When KMS needs to verify access for a specific key or secret, it will check against all defined domains for the token used in the HTTP authentication, and will determine permissions based on which domains match the key or secret. That means that, for example, you can set read and write permissions for "users/mail/", but only read permissions 
+When KMS needs to verify access for a specific key or secret, it will check against all defined domains for the token used in the HTTP authentication, and will determine permissions based on which domains match the key or secret. That means that, for example, you can set read and write permissions for "users/mail/", but only read permissions 
  for "users/"
  
 - `/create_keys` 
