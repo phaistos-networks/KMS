@@ -1,4 +1,7 @@
-// DEPS: https://github.com/dsprenkels/sss
+// KMS: A simple Keys management service
+// (C) Phaistos Networks, S.A.
+//
+// DEPS: https://github.com/dsprenkels/sss, https://github.com/nlohmann/json, https://github.com/nlohmann/json, https://github.com/Cyan4973/xxHash, OpenSSL: https://www.openssl.org/
 #include "sss/sss.h"
 #include <base64.h>
 #include <data.h>
@@ -6,14 +9,31 @@
 #include <network.h>
 #include <switch.h>
 #include <switch_security.h>
-#include <switch_url.h>
 #include <sys/mman.h>
+#ifndef SWITCH_MIN
+#include <switch_url.h>
 #include <tls.h>
-#include <unordered_map>
 #include <switch_rpc.h>
+#else
+#include <openssl/bio.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/rand.h>
+#include <openssl/opensslconf.h>
+#include <openssl/evp.h>
+#include <openssl/engine.h>
+#include <switch_hash.h>
+#include <switch_mallocators.h>
+#include <text.h>
+#include <network.h>
+#include <signal.h>
+#include <compress.h>
+#include <ext/json.hpp>
+#endif
+#include <unordered_map>
 
-static constexpr const bool dev_mode{true};
-static constexpr const std::size_t max_masterkey_shares{16};
+static constexpr bool dev_mode{true}; // enable it for development
+static constexpr std::size_t max_masterkey_shares{16};
 
 struct authenticated_session
 {
@@ -91,8 +111,6 @@ struct connection
 
         uint32_t flags{0};
 
-		
-
         struct
         {
                 struct
@@ -155,7 +173,7 @@ static bool verify_secret_prop_name(const str_view32 prop) noexcept
 // root/sub/sub/sub...
 static bool verify_objid(const str_view32 s) noexcept
 {
-	static constexpr const bool trace{false};
+	static constexpr bool trace{false};
 
         if (s.size() < 2 || s.size() > 128 || s.front() == '/' || s.back() == '/')
 	{
@@ -199,11 +217,11 @@ static bool verify_objid(const str_view32 s) noexcept
 
 namespace
 {
-        // the IV we use for encrypting/decrypting keys we manage is based on their key name
-        // this is the iv[] we will use for encrypting/decrypting managed keys(i.e key => manged key) -- the encrypted keys
+        // The IV we use for encrypting/decrypting keys we manage is based on their key name
+        // This is the iv[] we will use for encrypting/decrypting managed keys(i.e key => manged key) -- the encrypted keys
         // are stored in the backing store
         //
-        // we use the same iv[] for encrypting/decrypting arbitrary (plaintext or ciphertext) content
+        // We use the same iv[] for encrypting/decrypting arbitrary (plaintext or ciphertext) content
         // and by extension, for wrap/unwrap operations, for the provided *wrapped* key
         void build_iv(const str_view32 keyname, uint64_t iv[])
         {
@@ -225,21 +243,35 @@ int main(int argc, char *argv[])
 
                 if (-1 == stat64(path, &s))
                 {
-                        Print("Failed to authorize user\n");
+                        Print("Failed to authorize user: unable to stat file:", strerror(errno), "\n");
                         return false;
                 }
 
                 if (s.st_mode & S_IRWXO)
                 {
                         // Others cannot possibly read, write, or execute this binary
-                        Print("Failed to authorize user\n");
+                        Print("Failed to authorize user. Unexpected file permissions for ", path, "\n");
                         return false;
                 }
 
-                // TODO: anything else we could try to verify integrity of a file?
+                return true;
+        };
 
-                // TODO: need to verify all local files
-                // that KMS may depend on (e.g configuration files, etc)
+        [[maybe_unused]] const auto verify_ownership_with_fd = [](const auto path, auto fd) {
+                struct stat s;
+
+                if (-1 == fstat(fd, &s))
+                {
+                        Print("Failed to authorize user: unable to stat file:", strerror(errno), "\n");
+                        return false;
+                }
+
+                if (s.st_mode & S_IRWXO)
+                {
+                        Print("Failed to authorize user. Unexpected file permissions for ", path, "\n");
+                        return false;
+                }
+
                 return true;
         };
 
@@ -248,7 +280,7 @@ int main(int argc, char *argv[])
 #ifdef MLOCK_ONFAULT
                 if (-1 == mlockall(MLOCK_ONFAULT))
 #else
-                if (-1 == mlockall(0))
+                if (-1 == mlockall(MCL_CURRENT | MCL_FUTURE))
 #endif
                 {
                         Print("System Error: cannot guarantee safety. Cowardly aborting: ", strerror(errno), "\n");
@@ -271,35 +303,29 @@ int main(int argc, char *argv[])
 
                 if (auto fh = fopen("/proc/self/cmdline", "r"); nullptr == fh)
                 {
-                        Print("Failed to authorize user\n");
+                        Print("Failed to authorize user: unable to access cmdline\n");
                         return 1;
                 }
                 else if (nullptr == fgets(b, sizeof(b), fh))
                 {
                         fclose(fh);
-                        Print("Failed to authorize user\n");
+                        Print("Failed to authorize user: unable to read cmdline\n");
                         return 1;
                 }
                 else
                 {
                         if (!verify_ownership(b /* this works, because command is \0 terminated */))
                                 return 1;
-
-                        // TODO: need to verify all local files
-                        // that KMS may depend on (e.g configuration files, etc)
-                        return 0;
                 }
         }
 
+
+        MysqlClient mysql_client;
         Switch::endpoint e;
         int r;
 	uint32_t now = time(nullptr);
         IOBuffer base64_buf, tbuf;
         static const str_view32 server_name("Phaistos KMS");
-        // TODO:
-        // - Need to authenticate(username, password) to an isolated mySQL server
-        // - Need to enable compression and encryption for mySQL client
-        MysqlClient mysql_client("legolas");
 
         struct Enclave
         {
@@ -310,7 +336,7 @@ int main(int argc, char *argv[])
 		uint32_t tokens_sequencer_gen{0};
 		uint32_t tokens_sequencer{0}; 
 
-                uint8_t enc_key[32]; // AES-256, 8-bytes key
+                uint8_t enc_key[256 / 8]; // AES-256, 8-bytes key
                 bool locked{true};
 
 
@@ -322,12 +348,6 @@ int main(int argc, char *argv[])
 		} cur_sess;
 
 
-                // Whenever somone unlocks we
-                // store it here. Once shares_cnt >= master_key_shares_threshold
-                // we try to unlock. If we can unlock, then we set locked = false, set enc_key and
-                // set shares_cnt = 0
-                // To unlock, set locked = true,  memset(enc_key, 0, sizeof(enc_key)) and
-                // set shares_cnt = 0
                 struct
                 {
                         uint8_t shares_cnt{0};
@@ -336,8 +356,8 @@ int main(int argc, char *argv[])
                         uint8_t collected{0};
                         Buffer shares[max_masterkey_shares];
 
-                        // used for encryptine all provided shares
-                        // and reset when we get the first share
+                        // used for encrypting all provided shares
+                        // we reset when we get the first share
                         uint8_t enc_key[32] = {0};
                         uint8_t enc_iv[16];
 
@@ -393,7 +413,7 @@ int main(int argc, char *argv[])
 
                 tl::optional<authenticated_session> parse_token(const str_view32 repr, const uint32_t now) const
                 {
-                        static constexpr const bool trace{false};
+                        static constexpr bool trace{false};
                         uint64_t input[8];
                         uint8_t n{0};
 
@@ -424,7 +444,7 @@ int main(int argc, char *argv[])
 			if (const auto exp_ts = input[2]; exp_ts && exp_ts < now)
 			{
 				// Expired
-				// TODO: delete from phaistos_kms.tokens
+				// TODO: delete from tokens
 				if (trace)
 					SLog("Expired already (now = ", now, ", exp_ts = ", exp_ts, ")\n");
 
@@ -451,10 +471,8 @@ int main(int argc, char *argv[])
                                 [[maybe_unused]] const auto account_id = input[0];
 
                                 // TODO: check if account_id is in our revoked tokens list
-
                                 // If it is not, see if it's in our database
                                 // if it is, make room for it in the in-memory revoked tokens list and reny access
-
                                 // if not, we need to create a new token
                                 // with a proper lease. Short leases faciliate frequent checks for revoked tokens
                         }
@@ -499,12 +517,97 @@ int main(int argc, char *argv[])
         };
 
         std::unordered_map<uint32_t, std::unique_ptr<token_props>> tokens_map;
+	Buffer _mc;
+	bool use_http{false};
+
+	if (dev_mode)
+		Print("KMS is running in DEVELOPMENT MODE. Please make sure you acknowledge that\n");
 
         e.unset();
-        while ((r = getopt(argc, argv, "l:")) != -1)
+        while ((r = getopt(argc, argv, dev_mode ? "l:M:f:P" : "l:f:P")) != -1)
         {
                 switch (r)
                 {
+			case 'P':
+				use_http = true;
+				break;
+
+			case 'f':
+                        {
+                                int fd = open(optarg, O_RDONLY | O_CLOEXEC);
+
+                                if (fd == -1)
+                                {
+                                        Print("Unable to access ", optarg, ": ", strerror(errno), "\n");
+                                        return 1;
+                                }
+
+                                if (!dev_mode && !verify_ownership_with_fd(optarg, fd))
+                                        return 1;
+
+                                struct vma_dtor
+                                {
+                                        const off_t size_;
+
+                                        vma_dtor(const off_t size)
+                                            : size_{size}
+                                        {
+                                        }
+
+                                        void operator()(void *ptr)
+                                        {
+                                                if (ptr != MAP_FAILED)
+                                                        munmap(ptr, size_);
+                                        }
+                                };
+
+                                const auto file_size = lseek(fd, 0, SEEK_END);
+                                std::unique_ptr<void, vma_dtor> vma(mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0), vma_dtor(file_size));
+
+                                close(fd);
+
+                                if (vma.get() == MAP_FAILED)
+                                {
+                                        Print("System Error:", strerror(errno), "\n");
+                                        return 1;
+                                }
+
+                                madvise(vma.get(), file_size, MADV_SEQUENTIAL | MADV_DONTDUMP);
+
+                                for (const auto s : str_view32(reinterpret_cast<const char *>(vma.get()), file_size).Split('\n'))
+                                {
+                                        if (const auto l = s.Divided('#').first.ws_trimmed())
+                                        {
+						const auto [n, v] = l.Divided('=');
+						const auto name = n.ws_trimmed();
+						const auto value = v.ws_trimmed();
+
+						if (name.Eq(_S("persist.mysql.endpoint")))
+						{
+							_mc.clear();
+							_mc.append(value);
+						}
+						else
+							Print("Unsupported configuration option '", name, "'\n");
+                                        }
+                                }
+                        }
+                        break;
+
+			case 'M':
+				if (!dev_mode)
+				{
+					Print("Not Supported Option\n");
+					return 1;
+				}
+				else
+                                {
+                                        // not supposed to use this
+                                        // this is for development puproses really
+                                        _mc.append(optarg);
+                                        break;
+                                }
+
                         case 'l':
                         {
                                 const str_view32 repr(optarg);
@@ -534,8 +637,74 @@ int main(int argc, char *argv[])
         argc -= optind;
         argv += optind;
 
+	if (_mc.empty())
+	{
+		char input[512];
+
+		fprintf(stderr, "mySQL endpoint (username:password@host[:port]/databasename): ");
+		fgets(input, sizeof(input), stdin);
+
+		_mc.append(input);
+#ifndef SWITCH_MIN
+		_mc.TrimWS();
+#endif
+	}
+
+        {
+                if (_mc.size() > 255)
+                {
+                        Print("Invalid mySQL endpoint\n");
+                        return 1;
+                }
+
+                // user[:password]@endpoint[/database_name]
+                const auto[auth, r] = _mc.as_s32().Divided('@');
+
+                if (!auth || !r)
+                {
+                        Print("Invalid mySQL endpoint\n");
+                        return 1;
+                }
+
+                const auto[endpoint, dbname] = r.Divided('/');
+
+                if (!endpoint || !dbname)
+                {
+                        Print("Invalid mySQL endpoint\n");
+                        return 1;
+                }
+
+                const auto[hostname, port_repr] = endpoint.Divided(':');
+                const uint32_t port = port_repr ? port_repr.as_uint32() : 3306;
+                const auto[username, password] = auth.Divided(':');
+
+                if (!username || !password)
+                {
+                        Print("Invalid mySQL endpoint\n");
+                        return 1;
+                }
+
+                char hostname_data[0xff], username_data[0xff], password_data[0xff], dbname_data[0xff];
+
+                hostname.ToCString(hostname_data, sizeof(hostname_data));
+                username.ToCString(username_data, sizeof(username_data));
+                password.ToCString(password_data, sizeof(password_data));
+                dbname.ToCString(dbname_data, sizeof(dbname_data));
+
+                try
+                {
+                        mysql_client.enable_ssl();
+                        mysql_client.connect(hostname_data, username_data, password_data, dbname_data, port, nullptr, 0);
+                }
+                catch (...)
+                {
+                        Print("Unable to establish secure connection. Aborting\n");
+                        return 1;
+                }
+        }
+
         const auto set_response_connection_header = [](auto c) {
-                // TODO: if (c->inb->offset() == c->inb->size()), we have more requests to processs so maybe we should shutdown the connection
+                // TODO: if (c->inb->offset() == c->inb->size()), we have more requests to processs, so maybe we should shutdown the connection
                 if ((c->flags & unsigned(connection::Flags::shutdown_onflush)) || c->state.cur_req.expect_connection_close)
                 {
                         c->iov.append("Connection: close\r\n"_s32);
@@ -662,13 +831,8 @@ int main(int argc, char *argv[])
                 wrapping_key_from_master_key(restored_master_key, wrapping_key);
 
                 // Fetch the wrapped key from the backing store
-                if (auto rows = mysql_client.select("SELECT k FROM phaistos_kms.keyring  WHERE id = '*'"_s32); auto &&row = rows.next())
+                if (auto rows = mysql_client.select("SELECT k FROM keyring WHERE id = '*'"_s32); auto &&row = rows.next())
                 {
-#if 0 // no need to display this
-			repr.clear();
-			Base64::Encode(restored_master_key, sss_MLEN, &repr);
-			SLog("Reconstructed [", repr, "]\n");
-#endif
                         if (row[0].size() < 8)
                         {
                                 // Sanity check
@@ -736,13 +900,12 @@ int main(int argc, char *argv[])
                         {
                                 if (false == dev_mode)
                                 {
-                                        if (mysql_client.select("SELECT 1 FROM phaistos_kms.keyring WHERE id = '*'"_s32).size())
+                                        if (mysql_client.select("SELECT 1 FROM keyring WHERE id = '*'"_s32).size())
                                         {
-                                                Print("Already initializing. Cowardingly aborting\n");
+                                                Print("Already initialized. Cowardingly aborting\n");
                                                 return 1;
                                         }
                                 }
-
 
 
                                 uint8_t master_key[sss_MLEN];
@@ -797,7 +960,7 @@ int main(int argc, char *argv[])
                                 // it's fine if someone accesses it anyway, because that's just two numbers
                                 // TODO: consider alternative ways to store those
                                 mysql_client.begin();
-                                mysql_client.exec("REPLACE INTO phaistos_kms.keyring VALUES ('*', '", char('a' + cnt), char('a' + threshold), escaped_repr(wrapped_enc_key.as_s32()), "')");
+                                mysql_client.exec("REPLACE INTO keyring VALUES ('*', '", char('a' + cnt), char('a' + threshold), escaped_repr(wrapped_enc_key.as_s32()), "')");
 				
 				// Another for the root token
 				// We will encrypt it using our KMS enc.key
@@ -824,7 +987,9 @@ int main(int argc, char *argv[])
                                 // It should't be stored anywhere, TODO: UNLESS you have a trusted environment, and you want to store it somewhere
                                 // so that when you unlock it later, you can somehow use the master key instead of requiring shares
                                 // This is so that it can be automated to some extent (no need for someone to physically paste/type their shares)
-                                //Print("MASTER KEY ",  repr.as_s32(), ", required ", threshold, "\n");
+				//
+				// TODO: maybe we should salt, and encrypt each share, so that the base64 representation will be less uniform and
+				// will be harder for someone to - in theory - guess a share.
 
 				Print("Root Token: ", wrapped_root_token_base64, "\n");
                                 for (uint32_t i{0}; i != cnt; ++i)
@@ -855,11 +1020,11 @@ int main(int argc, char *argv[])
 
         if (!e)
         {
-                Print("Endpoint not provided\n");
+                Print("Listen (address:)port not specified\n");
                 return 1;
         }
 
-        if (auto rows = mysql_client.select("SELECT k FROM phaistos_kms.keyring WHERE id = '*'"_s32); auto &&row = rows.next())
+        if (auto rows = mysql_client.select("SELECT k FROM keyring WHERE id = '*'"_s32); auto &&row = rows.next())
         {
                 if (row[0].size() < 8)
                 {
@@ -904,27 +1069,36 @@ int main(int argc, char *argv[])
 	}
 
 
+        std::unique_ptr<SSL_CTX, decltype(&::SSL_CTX_free)> ssl_ctx(nullptr, SSL_CTX_free);
 
-        SSL_library_init();
-        SSL_load_error_strings();
-        SSLeay_add_ssl_algorithms();
-        OpenSSL_add_all_algorithms();
+	if (!use_http)
+	{
+		SSL_library_init();
+		SSL_load_error_strings();
+		SSLeay_add_ssl_algorithms();
+		OpenSSL_add_all_algorithms();
+	}
 
         DEFER({
-                FIPS_mode_set(0);
-                ENGINE_cleanup();
-                CONF_modules_unload(1);
-                CONF_modules_free();
-                EVP_cleanup();
-                CRYPTO_cleanup_all_ex_data();
-                sk_SSL_COMP_free(SSL_COMP_get_compression_methods());
-                ERR_remove_state(0);
-                ERR_free_strings();
+		if (!use_http)
+                {
+                        FIPS_mode_set(0);
+                        ENGINE_cleanup();
+                        CONF_modules_unload(1);
+                        CONF_modules_free();
+                        EVP_cleanup();
+                        CRYPTO_cleanup_all_ex_data();
+                        sk_SSL_COMP_free(SSL_COMP_get_compression_methods());
+                        ERR_remove_state(0);
+                        ERR_free_strings();
+                }
         });
 
-        std::unique_ptr<SSL_CTX, decltype(&::SSL_CTX_free)> ssl_ctx(SSL_CTX_new(SSLv23_server_method()), ::SSL_CTX_free);
+	if (!use_http)
+        {
+                ssl_ctx.reset(SSL_CTX_new(SSLv23_server_method()));
 
-        require(ssl_ctx);
+                require(ssl_ctx);
 
 #if 0
 	SSL_CTX_set_info_callback(ssl_ctx.get(), [](const SSL *s, int where, int ret) { 
@@ -982,40 +1156,53 @@ int main(int argc, char *argv[])
 		return 1;
         });
 #else
-        SSL_CTX_set_verify(ssl_ctx.get(), SSL_VERIFY_NONE, nullptr);
+                SSL_CTX_set_verify(ssl_ctx.get(), SSL_VERIFY_NONE, nullptr);
 #endif
 
-        // If we don't configure our SSL_CTX with a private key, certificate
-        // then all connection/handshake attempts will fail
-        const char *key_path{"/tmp/crts/origin-key.pem"};
-        const char *crt_path{"/tmp/crts/origin-crt.pem"};
+                // If we don't configure our SSL_CTX with a private key, certificate
+                // then all connection/handshake attempts will fail
+                const char *key_path{"./crts/key.pem"};
+                const char *crt_path{"./crts/crt.pem"};
 
-        if (1 != SSL_CTX_use_PrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_PEM) && 1 != SSL_CTX_use_PrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_ASN1) && 1 != SSL_CTX_use_RSAPrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_PEM) && 1 != SSL_CTX_use_RSAPrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_ASN1))
-        {
-                SLog("Failed to use private key\n");
-                return 1;
+                if (!dev_mode)
+                {
+                        if (!verify_ownership(key_path))
+                                return 1;
+                        else if (!verify_ownership(crt_path))
+                                return 1;
+                }
+
+                if (1 != SSL_CTX_use_PrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_PEM) && 1 != SSL_CTX_use_PrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_ASN1) &&
+                    1 != SSL_CTX_use_RSAPrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_PEM) &&
+                    1 != SSL_CTX_use_RSAPrivateKey_file(ssl_ctx.get(), key_path, SSL_FILETYPE_ASN1))
+                {
+                        SLog("Failed to use private key. Verify that ./crts/key.pem and ./crts/crt.pem are valid\n");
+                        return 1;
+                }
+
+                if (-1 == SSL_CTX_check_private_key(ssl_ctx.get()))
+                {
+                        SLog("Failed to verify private key\n");
+                        return 1;
+                }
+
+                if (1 != SSL_CTX_use_certificate_file(ssl_ctx.get(), crt_path, SSL_FILETYPE_PEM) && 1 != SSL_CTX_use_certificate_file(ssl_ctx.get(), crt_path, SSL_FILETYPE_ASN1))
+                {
+                        SLog("Failed to set certificate\n");
+                        return 1;
+                }
+
+                SSL_CTX_set_mode(ssl_ctx.get(), SSL_MODE_AUTO_RETRY | SSL_MODE_ENABLE_PARTIAL_WRITE);
+                SSL_CTX_set_default_read_ahead(ssl_ctx.get(), 1);
+                SSL_CTX_set_options(ssl_ctx.get(), SSL_OP_ALL | SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION | SSL_OP_LEGACY_SERVER_CONNECT);
+
+                if (SSL_CTX_set_cipher_list(ssl_ctx.get(), "ALL") <= 0)
+                {
+                        Print("TLS initialization failed: Unable to setup ciphers\n");
+                        return 1;
+                }
         }
 
-        if (-1 == SSL_CTX_check_private_key(ssl_ctx.get()))
-        {
-                SLog("Failed to verify private key\n");
-                return 1;
-        }
-
-        if (1 != SSL_CTX_use_certificate_file(ssl_ctx.get(), crt_path, SSL_FILETYPE_PEM) && 1 != SSL_CTX_use_certificate_file(ssl_ctx.get(), crt_path, SSL_FILETYPE_ASN1))
-        {
-                SLog("Failed to set certificate\n");
-                return 1;
-        }
-
-        SSL_CTX_set_mode(ssl_ctx.get(), SSL_MODE_AUTO_RETRY | SSL_MODE_ENABLE_PARTIAL_WRITE);
-        SSL_CTX_set_default_read_ahead(ssl_ctx.get(), 1);
-        SSL_CTX_set_options(ssl_ctx.get(), SSL_OP_ALL | SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION | SSL_OP_LEGACY_SERVER_CONNECT);
-        if (SSL_CTX_set_cipher_list(ssl_ctx.get(), "ALL") <= 0)
-        {
-                Print("TLS initialization failed: Unable to setup ciphers\n");
-                return 1;
-        }
 
         int listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         struct sockaddr_in sa;
@@ -1130,10 +1317,15 @@ int main(int argc, char *argv[])
         };
 
         const auto try_write = [&](auto c) {
+		static constexpr auto trace{false};
                 const auto fd{c->fd};
                 auto idx{c->iov.idx};
                 const auto size{c->iov.size};
                 int r;
+		const auto before = Timings::Microseconds::Tick();
+
+		if (trace)
+			SLog("Output ", c->iov.need_patch, "\n");
 
                 if (c->iov.need_patch)
                 {
@@ -1179,6 +1371,10 @@ int main(int argc, char *argv[])
                         c->flags &= ~unsigned(connection::Flags::tls_want_write);
 
                         r = SSL_write(ssl, tbuf.data(), tbuf.size());
+
+			if (trace)
+				SLog("SSL_write() ", r, "\n");
+
                         if (r < 0)
                         {
                                 if (const auto reason = SSL_get_error(ssl, r); reason == SSL_ERROR_WANT_READ)
@@ -1219,7 +1415,12 @@ int main(int argc, char *argv[])
                                         return false;
                                 }
                                 else
+				{
+					if (trace)
+						SLog("Will need to retry?\n");
+
                                         return true;
+				}
                         }
                         else
                                 goto l1;
@@ -1253,6 +1454,9 @@ int main(int argc, char *argv[])
 
                                         if (c->flags & unsigned(connection::Flags::shutdown_onflush))
                                         {
+						if (trace)
+							SLog("Took ", duration_repr(Timings::Microseconds::Since(before)), "\n");
+
                                                 shutdown(c, __LINE__);
                                                 return false;
                                         }
@@ -1268,6 +1472,9 @@ int main(int argc, char *argv[])
 
                                         c->iov.idx = 0;
                                         c->iov.size = 0;
+
+					if (trace)
+						SLog("Took ", duration_repr(Timings::Microseconds::Since(before)), "\n");
                                         return true;
                                 }
                         }
@@ -1310,24 +1517,14 @@ int main(int argc, char *argv[])
 		if (c->is_root())
 			return true;
 
-		static constexpr const bool trace{false};
+		static constexpr bool trace{false};
 		const auto account_id = c->state.cur_req.auth.value().account_id;
 		auto res = tokens_map.emplace(account_id, std::unique_ptr<token_props>{});
 
-#if 0
-		if (!res.second && res.first->second && now - res.first->second->last_update > 60)
-		{
-			// try again?
-			goto l1;
-		}
-#endif
-
-			
 
 		if (res.second)
 		{
-l1:
-			if (auto rows = mysql_client.select("SELECT iv, domains FROM phaistos_kms.tokens WHERE id = ", account_id); auto &&row = rows.next())
+			if (auto rows = mysql_client.select("SELECT iv, domains FROM tokens WHERE id = ", account_id); auto &&row = rows.next())
 			{
 				if (row[0].size() != 16)
 				{
@@ -1464,11 +1661,12 @@ l1:
                                 return try_flush(c);
                         }
 
-                        auto b = mysql_client._GetQueryBuffer();
+                        auto b = mysql_client.internal_buffer();
+			auto outb = c->outb ?: (c->outb = new_buf());
+			const auto co{outb->size()};
 
                         b->clear();
-                        b->append("REPLACE INTO phaistos_kms.keyring VALUES "_s32);
-
+                        b->append("REPLACE INTO keyring VALUES "_s32);
                         for (const auto id : content.Split('\n'))
                         {
                                 if (id)
@@ -1491,6 +1689,7 @@ l1:
                                         build_iv(id, iv);
 
                                         // Create a new key for this key id
+					// (clients will likely use this as a wrapping key)
                                         switch_security::gen_rnd(32, key);
 
                                         // Encrypt it using our enc.key
@@ -1498,18 +1697,41 @@ l1:
                                                                     .encrypt({reinterpret_cast<const char *>(key), 32});
 
                                         b->append("('", escaped_repr(id.data(), id.size()), "', '", escaped_repr(ciphertext.data(), ciphertext.size()), "'),"_s32);
+
+					outb->append(id, ' ');
+					Base64::Encode(reinterpret_cast<const uint8_t *>(key), 256/8, outb);
+					outb->append('\n');
                                 }
                         }
 
                         if (b->back() == ',')
                         {
                                 b->pop_back();
-                                if (!mysql_client.SendQuery(false, b->data(), b->size()))
+                                if (!mysql_client.exec_stmt(false, b->data(), b->size()))
                                 {
-                                        mysql_client.rollback();
                                         build_response(c, "500 Internal Server Error"_s32);
                                         return try_flush(c);
                                 }
+				else
+				{
+					c->iov.append("HTTP/1.1 200 OK\r\n"_s32);
+					c->iov.append("Content-Length: "_s32);
+
+					const auto o{outb->size()};
+					const auto cl = outb->size() - co;
+
+					outb->append(cl);
+					c->iov.append_range({o, outb->size() - o});
+
+					c->iov.append("\r\nServer: "_s32);
+					c->iov.append(server_name);
+					c->iov.append("\r\n"_s32);
+					set_response_connection_header(c);
+					c->iov.append("\r\n"_s32);
+
+					c->iov.append_range({co, cl});
+					return try_flush(c);
+				}
                         }
 
                         build_response(c, "200 OK"_s32);
@@ -1533,10 +1755,10 @@ l1:
                                 return try_flush(c);
                         }
 
-                        auto b = mysql_client._GetQueryBuffer();
+                        auto b = mysql_client.internal_buffer();
 
                         b->clear();
-                        b->append("DELETE FROM phaistos_kms.keyring WHERE id IN ("_s32);
+                        b->append("DELETE FROM keyring WHERE id IN ("_s32);
 
                         for (const auto line : content.Split('\n'))
                         {
@@ -1544,7 +1766,7 @@ l1:
 
                                 if (false == verify_objid(key_name) || b->size() > 20 * 1024 * 1024)
                                 {
-                                        build_response(c, "400 Bad Request"_s32);
+                                        build_response(c, "400 Bad Request"_s32, "Cannot verify key name"_s32);
                                         return try_flush(c);
                                 }
 
@@ -1562,7 +1784,7 @@ l1:
                                 b->pop_back();
                                 b->append(')');
 
-                                if (false == mysql_client.SendQuery(false, b->data(), b->size()))
+                                if (false == mysql_client.exec_stmt(false, b->data(), b->size()))
                                 {
                                         build_response(c, "500 Internal Server Error"_s32);
                                         return try_flush(c);
@@ -1603,7 +1825,7 @@ l1:
                                 {
                                         if (false == verify_objid(objid) || wrapping_key_base64.size() > 512)
                                         {
-                                                build_response(c, "400 Bad Request"_s32);
+                                                build_response(c, "400 Bad Request"_s32, "Cannot verify key name"_s32);
                                                 return try_flush(c);
                                         }
 
@@ -1619,11 +1841,11 @@ l1:
 
                         mysql_client.begin();
 
-                        auto b = mysql_client._GetQueryBuffer();
+                        auto b = mysql_client.internal_buffer();
                         uint64_t iv[2];
-                        b->clear();
 
-                        b->append("REPLACE INTO phaistos_kms.keyring VALUES "_s32);
+                        b->clear();
+                        b->append("REPLACE INTO keyring VALUES "_s32);
                         for (const auto &it : all)
                         {
                                 const auto[id, wrapping_key_base64] = it;
@@ -1632,7 +1854,7 @@ l1:
                                 base64_buf.clear();
                                 if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(wrapping_key_base64.data()), wrapping_key_base64.size(), &base64_buf))
                                 {
-                                        build_response(c, "400 Bad Request"_s32);
+                                        build_response(c, "400 Bad Request"_s32, "Unable to parse base64"_s32);
                                         return try_flush(c);
                                 }
 
@@ -1645,7 +1867,8 @@ l1:
                                 //
                                 // This wrapping key was generated the application, and was used to encrypt the data key(the _wrapped_ key)
                                 // The data key was used to encrypt the data. The encrypted data is stored together with the wrapped key.
-                                const auto ciphertext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}.encrypt(wrapping_key);
+                                const auto ciphertext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}.
+					encrypt(wrapping_key);
 
                                 b->append("('", escaped_repr(id.data(), id.size()), "', '", escaped_repr(ciphertext.data(), ciphertext.size()), "'),"_s32);
                         }
@@ -1653,7 +1876,7 @@ l1:
                         if (b->back() == ',')
                         {
                                 b->pop_back();
-                                if (!mysql_client.SendQuery(false, b->data(), b->size()))
+                                if (!mysql_client.exec_stmt(false, b->data(), b->size()))
                                 {
                                         mysql_client.rollback();
                                         build_response(c, "500 Internal Server Error"_s32);
@@ -1674,6 +1897,12 @@ l1:
                 }
                 else if (path.Eq(_S("/encrypt")) || path.Eq(_S("/wrap")))
                 {
+			// /encrypt and /decrypt are only really meaningful if you are not using the (entity key, wrapping key, wrapped key) pattern
+			// where you create the entity key and the wrapping key that's used to encrypt the entity key, and then associate the key with the wrapping key on KMS.
+			//
+			// If you used /create_key or /set_keys, and that key is used for encrypting/decrypting arbitrary plaintext in ways that make sense in your application, then
+			// /encrypt and /decrypt are handy. This is the functionality Google's KMS offers currently. You create keys in keyrings(KMS currently only supports a single keyring)
+			// and use the APIS for encrypting plaintext and decrypting ciphertext provided in the RPC
                         if (!req_method_check(c, "POST"_s32))
                                 return false;
 
@@ -1694,7 +1923,7 @@ l1:
 
                         if (!verify_objid(keyname))
                         {
-                                build_response(c, "400 Bad Request"_s32);
+                                build_response(c, "400 Bad Request"_s32, "Unable to verify keyname"_s32);
                                 return try_flush(c);
                         }
 
@@ -1704,7 +1933,7 @@ l1:
                                 return try_flush(c);
                         }
 
-                        if (auto &&rows = mysql_client.select("SELECT k FROM phaistos_kms.keyring WHERE id = '", escaped_repr(keyname), "'"); auto &&row = rows.next())
+                        if (auto &&rows = mysql_client.select("SELECT k FROM keyring WHERE id = '", escaped_repr(keyname), "'"); auto &&row = rows.next())
                         {
                                 uint64_t iv[2];
                                 const auto ciphertext{row[0]};
@@ -1712,6 +1941,7 @@ l1:
                                 build_iv(keyname, iv);
 
                                 // Decrypte the stored key using KM's encryption key
+				// this will produce the wrapping key we associated with this key earlier using /set_keys or /create_key
                                 const auto plaintext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}.decrypt(ciphertext);
 
                                 // that's our key (key name=>key)
@@ -1726,11 +1956,14 @@ l1:
                                         base64_buf.clear();
                                         if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(plaintext_base64.data()), plaintext_base64.size(), &base64_buf))
                                         {
-                                                build_response(c, "400 Bad Request"_s32);
+                                                build_response(c, "400 Bad Request"_s32, "Unable to decode base64"_s32);
                                                 return try_flush(c);
                                         }
 
                                         // OK, now encrypt the provided plaintext to get the output ciphertext
+					// 
+					// this only makes sense if the associated (to key) wrapping key, is not used for unwrapping an 'entity key'
+					// i.e the wrapping key associated with the key is used for encrypting the actual content, not for encryption and decryption of another(entity) key
                                         const auto ciphertext_out = switch_security::ciphers::aes256{{reinterpret_cast<const uint8_t *>(wrapping_key.data()), wrapping_key.size()},
                                                                                                      {reinterpret_cast<const uint8_t *>(iv), 16}}
                                                                         .encrypt(base64_buf.as_s32());
@@ -1785,7 +2018,7 @@ l1:
 
                         if (!verify_objid(keyname))
                         {
-                                build_response(c, "400 Bad Request"_s32);
+                                build_response(c, "400 Bad Request"_s32, "Unable to verify key name"_s32);
                                 return try_flush(c);
                         }
 
@@ -1795,7 +2028,7 @@ l1:
                                 return try_flush(c);
                         }
 
-                        if (auto &&rows = mysql_client.select("SELECT k FROM phaistos_kms.keyring WHERE id = '", escaped_repr(keyname), "'"); auto &&row = rows.next())
+                        if (auto &&rows = mysql_client.select("SELECT k FROM keyring WHERE id = '", escaped_repr(keyname), "'"); auto &&row = rows.next())
                         {
                                 uint64_t iv[2];
                                 const auto ciphertext{row[0]};
@@ -1819,7 +2052,7 @@ l1:
                                                 base64_buf.clear();
                                                 if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(ciphertext_base64.data()), ciphertext_base64.size(), &base64_buf))
                                                 {
-                                                        build_response(c, "400 Bad Request"_s32);
+                                                        build_response(c, "400 Bad Request"_s32, "Unable to decode base64"_s32);
                                                         return try_flush(c);
                                                 }
 
@@ -1920,6 +2153,14 @@ l1:
                         c->iov.append_range({co, content_length});
                         return try_flush(c);
                 }
+                else if (path.Eq(_S("/seal_status")))
+                {
+			if (secure_enclave.locked)
+				build_response(c, "418 I am Teapot"_s32);
+			else
+				build_response(c, "200 OK"_s32);
+			return try_flush(c);
+                }
 		else if (path.Eq(_S("/revoke_token")))
 		{
                         if (!req_method_check(c, "POST"_s32))
@@ -1971,7 +2212,7 @@ l1:
                                         try
                                         {
 						// we will try again in a while
-                                                mysql_client.exec("DELETE FROM phaistos_kms.tokens WHERE id = ", auth.account_id);
+                                                mysql_client.exec("DELETE FROM tokens WHERE id = ", auth.account_id);
                                                 build_response(c, "200 OK"_s32);
                                                 return try_flush(c);
                                         }
@@ -1984,10 +2225,251 @@ l1:
                         }
                         catch (...)
                         {
-                                build_response(c, "400 Bad Request"_s32);
+                                build_response(c, "400 Bad Request"_s32, "Exception Raised"_s32);
                                 return try_flush(c);
                         }
 		}
+#ifdef SWITCH_MIN
+                else if (path.Eq(_S("/create_token")))
+                {
+			static constexpr bool trace{false};
+
+                        if (!req_method_check(c, "POST"_s32))
+                                return false;
+
+                        if (secure_enclave.locked)
+                        {
+                                build_response(c, "403 Forbidden"_s32, "LOCKED"_s32);
+                                return try_flush(c);
+                        }
+
+                        if (!c->is_root())
+                        {
+                                build_response(c, "401 Unauthorized"_s32);
+                                return try_flush(c);
+                        }
+
+			nlohmann::json j;
+
+			try
+			{
+				j = nlohmann::json::parse(std::string(content.data(), content.size()));
+			}
+			catch (const std::exception &e)
+			{
+				if (trace)
+					SLog("Failed to parse JSON content: ", e.what(), "\n");
+
+                                build_response(c, "400 Bad Request"_s32, "Failed to parse JSON content"_s32);
+                                return try_flush(c);
+			}
+
+			if (!j.is_object())
+                        {
+				if (trace)
+					SLog("Expected DICTionary\n");
+
+                                build_response(c, "400 Bad Request"_s32, "Expected dictionary"_s32);
+                                return try_flush(c);
+                        }
+
+			std::string display_name_stdstr;
+			auto domains = nlohmann::json::array();
+                        uint32_t exp_ts{0};
+
+			for (auto it = j.begin(), end = j.end(); it != end; ++it)
+			{
+				if (it.key() == "name"  && it.value().is_string())
+					display_name_stdstr = it.value();
+				else if (it.key() == "domains" && it.value().is_array())
+					domains = it.value();
+				else if (it.key() == "expires" && it.value().is_number())
+				{
+					if (const int64_t v = it.value(); v > 0)
+						exp_ts = v;
+
+				}
+			}
+
+			if (display_name_stdstr.empty() || domains.empty() || display_name_stdstr.size() > 64 || exp_ts <= now)
+			{
+				if (trace)
+					SLog("Invalid JSON request\n");
+
+                                build_response(c, "400 Bad Request"_s32, "Invalid JSON dictionary"_s32);
+                                return try_flush(c);
+                        }
+
+                        const str_view32 display_name(display_name_stdstr.data(), display_name_stdstr.size());
+                        std::vector<std::pair<std::string, uint32_t>> all;
+
+			for (const auto &i : domains)
+			{
+				if (!i.is_object())
+				{
+					if (trace)
+						SLog("Invalid domain\n");
+
+                                        build_response(c, "400 Bad Request"_s32, "Invalid domain definition"_s32);
+                                        return try_flush(c);
+                                }
+
+				std::string domain;
+                                uint32_t perms;
+
+				if (const auto it = i.find("domain"); it != i.end())
+				{
+					if (!(*it).is_string())
+					{
+                                                build_response(c, "400 Bad Request"_s32, "Invalid domain name"_s32);
+                                                return try_flush(c);
+					}
+
+
+					domain = *it;
+
+                                        if (domain.size() < 2 || domain.size() > 64 || domain.front() == '/' || domain.back() != '/' || domain.find("//") != std::string::npos)
+					{
+						if (trace)
+							SLog("Invalid domain\n");
+
+                                                build_response(c, "400 Bad Request"_s32, "Invalid domain name"_s32);
+                                                return try_flush(c);
+					}
+				}
+                                else
+                                {
+                                        if (trace)
+                                                SLog("Invalid JSON request\n");
+
+                                        build_response(c, "400 Bad Request"_s32, "Domain specified"_s32);
+                                        return try_flush(c);
+                                }
+
+				if (const auto it = i.find("permissions"); it != i.end())
+				{
+					if (!(*it).is_string())
+					{
+                                                build_response(c, "400 Bad Request"_s32, "Invalid permissions"_s32);
+                                                return try_flush(c);
+					}
+
+					const std::string v = *it;
+
+					if (trace)
+						SLog("Permissions [", v, "]\n");
+
+					perms = 0;
+					for (const auto c : v)
+                                        {
+                                                if (c == 'r')
+                                                        perms |= O_RDONLY;
+                                                else if (c == 'w')
+                                                        perms |= O_WRONLY;
+                                                else if (trace)
+                                                        SLog("Unexpected permissions flag ['", c, "']\n");
+                                        }
+                                }
+                                else
+                                {
+					if (trace)
+						SLog("Invalid JSON request\n");
+
+                                        build_response(c, "400 Bad Request"_s32, "Permissions not specified"_s32);
+                                        return try_flush(c);
+                                }
+
+
+                                all.push_back({domain, perms});
+                        }
+
+                        if (all.empty())
+                        {
+				if (trace)
+					SLog("No domains specified\n");
+
+                                build_response(c, "400 Bad Request"_s32, "No domains specified"_s32);
+                                return try_flush(c);
+                        }
+
+                        std::sort(all.begin(), all.end(), [](const auto &a, const auto &b) noexcept {
+                                return b.first.size() < a.first.size();
+                        });
+
+                        uint8_t iv[16];
+                        IOBuffer b;
+                        uint64_t token_data[7];
+
+                        for (const auto &it : all)
+                        {
+                                const auto &[domain, permissions] = it;
+
+                                b.pack(uint8_t(domain.size()));
+                                b.serialize(domain.data(), domain.size());
+                                b.pack(uint32_t(permissions));
+                        }
+
+                        // OK, let's create that token, and associate it with its policies
+			uint8_t token_iv[16];
+
+			switch_security::gen_rnd(16, token_iv);
+
+                        tbuf.clear();
+                        tbuf.append("INSERT INTO tokens SET id = 0, display_name = '"_s32);
+
+                        tbuf.append(escaped_repr(switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {token_iv, 16}}
+                                                     .encrypt(display_name)
+                                                     .as_s32()),
+                                    "', create_ts = UNIX_TIMESTAMP(), domains = '"_s32);
+
+                        tbuf.append(escaped_repr(switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {token_iv, 16}}
+                                                     .encrypt(b.as_s32())
+                                                     .as_s32()),
+                                    "', iv = '"_s32);
+
+                        tbuf.append(escaped_repr(token_iv, 16), '\'');
+
+                        mysql_client.begin();
+                        if (!mysql_client.exec_stmt(false, tbuf.data(), tbuf.size()))
+                        {
+                                mysql_client.rollback();
+                                build_response(c, "500 Internal Server Error"_s32);
+                                return try_flush(c);
+                        }
+
+                        const auto id = mysql_client.insert_id();
+                        char token_repr_buf[128];
+
+                        mysql_client.commit();
+
+                        secure_enclave.build_token(token_data, id, 60, exp_ts);
+                        build_iv("**"_s32, iv);
+
+                        const str_view32 token_repr(token_repr_buf, Enclave::token_repr(token_data, token_repr_buf));
+                        const auto encrypted_token_repr = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {iv, 16}}.encrypt(token_repr);
+                        auto outb = c->outb ?: (c->outb = new_buf());
+                        const auto bo = outb->size();
+
+                        Base64::Encode(reinterpret_cast<const uint8_t *>(encrypted_token_repr.data()), encrypted_token_repr.size(), outb);
+
+                        const auto co = outb->size();
+                        const auto bs = co - bo;
+
+                        c->iov.append("HTTP/1.1 200 OK\r\nServer: "_s32);
+                        c->iov.append(server_name);
+                        c->iov.append("\r\nContent-Length: "_s32);
+
+                        outb->append(bs);
+                        c->iov.append_range({co, outb->size() - co});
+                        c->iov.append(_S("\r\n"));
+                        set_response_connection_header(c);
+			maybe_extend_lease(c);
+                        c->iov.append("\r\n"_s32);
+                        c->iov.append_range({bo, bs});
+
+                        return try_flush(c);
+                }
+#else
                 else if (path.Eq(_S("/create_token")))
                 {
                         // Currently, only root can create new tokens. KMS nodes are stateless, or rather, they don't
@@ -2011,7 +2493,7 @@ l1:
                         //
                         //
                         // TODO: properly support tokens and policies, use Tank, encrypt messages to synchronize state among nodes
-			static constexpr const bool trace{true};
+			static constexpr bool trace{false};
 
                         if (!req_method_check(c, "POST"_s32))
                                 return false;
@@ -2038,6 +2520,7 @@ l1:
                         {
 				if (trace)
 					SLog("Unable to parse JSON request\n");
+
                                 build_response(c, "400 Bad Request"_s32);
                                 return try_flush(c);
                         }
@@ -2124,14 +2607,6 @@ l1:
                                                 else if (c == 'w')
                                                         perms |= O_WRONLY;
                                         }
-
-                                        if (!perms)
-                                        {
-						if (trace)
-							SLog("Invalid JSON request\n");
-                                                build_response(c, "400 Bad Request"_s32);
-                                                return try_flush(c);
-                                        }
                                 }
                                 else
                                 {
@@ -2175,14 +2650,14 @@ l1:
 			switch_security::gen_rnd(16, token_iv);
 
                         tbuf.clear();
-                        tbuf.append("INSERT INTO phaistos_kms.tokens SET id = 0, display_name = '"_s32);
+                        tbuf.append("INSERT INTO tokens SET id = 0, display_name = '"_s32);
 
                         tbuf.append(escaped_repr(switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {token_iv, 16}}.encrypt(display_name).as_s32()), "', create_ts = UNIX_TIMESTAMP(), domains = '"_s32);
                         tbuf.append(escaped_repr(switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {token_iv, 16}}.encrypt(b.as_s32()).as_s32()), "', iv = '"_s32);
                         tbuf.append(escaped_repr(token_iv, 16), '\'');
 
                         mysql_client.begin();
-                        if (!mysql_client.SendQuery(false, tbuf.data(), tbuf.size()))
+                        if (!mysql_client.exec_stmt(false, tbuf.data(), tbuf.size()))
                         {
                                 mysql_client.rollback();
                                 build_response(c, "500 Internal Server Error"_s32);
@@ -2221,26 +2696,12 @@ l1:
 
                         return try_flush(c);
                 }
+#endif
                 else if (path.Eq(_S("/unseal")))
                 {
                         if (!req_method_check(c, "POST"_s32))
                                 return false;
 
-                        // TODO: authenticate
-                        // Nothing really can be done unless KMS is unlocked, and we don't require specific credentials to unlock
-                        // i.e anyone can unlock, and we implicitly validate because only the owners of the shares can unlock
-                        //
-                        // Once KMS is unlocked, then ACL/policies can be accessed.
-                        // They are in turn stored in phaistos_kms.policies, and also encrypted with the secure_enclave.enc_key
-                        // (like Vault does). This means that when KMS is unlocked, we can validate against the ACL
-                        //
-                        // As it is the case with Vault, once KMS is unsealed/unlocked, every other operation requires a `client token`.
-                        // A user may have a client token sent to her. The client token must be sent as `X-KMS-Token` header.
-                        // Otherwise, a client token can be retrieved via authentication backends(see Vault's https://www.vaultproject.io/docs/auth/index.html)
-                        // Every authentication backend will have one or more unauthenticated login endpoints. These endpoints can be reached without any authentication, and are
-                        // used for authentication itself. They are specific to each authentication backend.
-                        // Login endpoints for authentication backends that generate an identiy will be sent down via JSON.
-                        // The resulting token should be saved on the client or passed via the `X-Vault-Token` header for future requests.
                         if (false == secure_enclave.locked)
                         {
                                 build_response(c, "400 Bad Request"_s32, "UNLOCKED already"_s32);
@@ -2249,56 +2710,62 @@ l1:
 
                         try
                         {
-                                base64_buf.clear();
-                                if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(content.data()), content.size(), &base64_buf))
+				for (const auto S : content.Split('\n'))
                                 {
-                                        build_response(c, "400 Bad Request"_s32);
-                                        return try_flush(c);
-                                }
+					if (!S)
+						continue;
 
-                                if (base64_buf.size() != sss_SHARE_LEN)
-                                {
-                                        build_response(c, "400 Bad Request"_s32);
-                                        return try_flush(c);
-                                }
-
-                                if (secure_enclave.mk_unlock_ctx.collected == 0)
-                                {
-                                        // reset
-                                        switch_security::gen_rnd(32, secure_enclave.mk_unlock_ctx.enc_key);
-                                        switch_security::gen_rnd(16, secure_enclave.mk_unlock_ctx.enc_iv);
-                                }
-
-                                secure_enclave.mk_unlock_ctx.shares[secure_enclave.mk_unlock_ctx.collected++] = switch_security::ciphers::aes256{{secure_enclave.mk_unlock_ctx.enc_key, 32}, {secure_enclave.mk_unlock_ctx.enc_iv, 16}}
-                                                                                                                    .encrypt(base64_buf.as_s32());
-
-                                if (secure_enclave.mk_unlock_ctx.collected == secure_enclave.mk_unlock_ctx.master_key_shares_threshold)
-                                {
-                                        // OK, let's try to unlock it
-                                        // if we fail, reset state
-                                        sss_Share shares[secure_enclave.mk_unlock_ctx.collected];
-
-                                        for (uint32_t i{0}; i != secure_enclave.mk_unlock_ctx.collected; ++i)
+                                        base64_buf.clear();
+                                        if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(S.data()), S.size(), &base64_buf))
                                         {
-                                                const auto plaintext = switch_security::ciphers::aes256{{secure_enclave.mk_unlock_ctx.enc_key, 32}, {secure_enclave.mk_unlock_ctx.enc_iv, 16}}
-                                                                           .decrypt(secure_enclave.mk_unlock_ctx.shares[i].as_s32());
-
-                                                require(plaintext.size() == sss_SHARE_LEN);
-                                                memcpy(shares[i], plaintext.data(), plaintext.size());
-                                        }
-
-                                        if (!try_unlock(shares, secure_enclave.mk_unlock_ctx.collected))
-                                        {
-                                                secure_enclave.mk_unlock_ctx.reset();
-                                                build_response(c, "401 Unauthorized"_s32);
+                                                build_response(c, "400 Bad Request"_s32);
                                                 return try_flush(c);
                                         }
-                                        else
+
+                                        if (base64_buf.size() != sss_SHARE_LEN)
                                         {
-                                                secure_enclave.locked = false;
-                                                secure_enclave.mk_unlock_ctx.reset();
-                                                build_response(c, "200 OK"_s32, "Vault is now UNLOCKED"_s32);
+                                                build_response(c, "400 Bad Request"_s32, "Failed to decode base64 input"_s32);
                                                 return try_flush(c);
+                                        }
+
+                                        if (secure_enclave.mk_unlock_ctx.collected == 0)
+                                        {
+                                                // reset
+                                                switch_security::gen_rnd(32, secure_enclave.mk_unlock_ctx.enc_key);
+                                                switch_security::gen_rnd(16, secure_enclave.mk_unlock_ctx.enc_iv);
+                                        }
+
+                                        secure_enclave.mk_unlock_ctx.shares[secure_enclave.mk_unlock_ctx.collected++] = switch_security::ciphers::aes256{{secure_enclave.mk_unlock_ctx.enc_key, 32}, {secure_enclave.mk_unlock_ctx.enc_iv, 16}}
+                                                                                                                            .encrypt(base64_buf.as_s32());
+
+                                        if (secure_enclave.mk_unlock_ctx.collected == secure_enclave.mk_unlock_ctx.master_key_shares_threshold)
+                                        {
+                                                // OK, let's try to unlock it
+                                                // if we fail, reset state
+                                                sss_Share shares[secure_enclave.mk_unlock_ctx.collected];
+
+                                                for (uint32_t i{0}; i != secure_enclave.mk_unlock_ctx.collected; ++i)
+                                                {
+                                                        const auto plaintext = switch_security::ciphers::aes256{{secure_enclave.mk_unlock_ctx.enc_key, 32}, {secure_enclave.mk_unlock_ctx.enc_iv, 16}}
+                                                                                   .decrypt(secure_enclave.mk_unlock_ctx.shares[i].as_s32());
+
+                                                        require(plaintext.size() == sss_SHARE_LEN);
+                                                        memcpy(shares[i], plaintext.data(), plaintext.size());
+                                                }
+
+                                                if (!try_unlock(shares, secure_enclave.mk_unlock_ctx.collected))
+                                                {
+                                                        secure_enclave.mk_unlock_ctx.reset();
+                                                        build_response(c, "401 Unauthorized"_s32);
+                                                        return try_flush(c);
+                                                }
+                                                else
+                                                {
+                                                        secure_enclave.locked = false;
+                                                        secure_enclave.mk_unlock_ctx.reset();
+                                                        build_response(c, "200 OK"_s32, "Vault is now UNLOCKED"_s32);
+                                                        return try_flush(c);
+                                                }
                                         }
                                 }
 
@@ -2312,6 +2779,134 @@ l1:
                                 build_response(c, "400 Bad Request"_s32);
                                 return try_flush(c);
                         }
+                }
+                else if (path.Eq(_S("/get_keys")))
+                {
+			// You shouldn't be using this, because it transfers the stored wrapping key to
+			// the client, instead of using the wrapping key with the provided wrapped keys
+			// to unwrap them and return the unwrapped keys back to the client.
+			if (!req_method_check(c, "POST"_s32))
+				return false;
+
+			if (!c->state.cur_req.auth)
+			{
+				build_response(c, "407 Authentication Required"_s32);
+				return try_flush(c);
+			}
+
+                        if (secure_enclave.locked)
+                        {
+                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                return try_flush(c);
+                        }
+
+                        // array of arrays, and each array must be of size 1, containing
+                        // (object id:string)
+			std::vector<str_view32> all;
+
+                        for (const auto line : content.Split('\n'))
+                        {
+				if (const auto objid = line.ws_trimmed())
+                                {
+                                        if (false == verify_objid(objid))
+                                        {
+                                                build_response(c, "400 Bad Request"_s32);
+                                                return try_flush(c);
+                                        }
+					
+					if (!auth_check(c, objid.as_s32(), O_RDONLY))
+					{
+						build_response(c, "401 Unauthorized"_s32);
+						return try_flush(c);
+					}
+
+					all.push_back(objid);
+                                }
+                        }
+
+                        auto outb = c->outb ?: (c->outb = new_buf());
+                        const auto resp_offset = outb->size();
+
+			if (!all.empty())
+                        {
+                                auto b = mysql_client.internal_buffer();
+
+                                b->clear();
+                                b->append("SELECT id, k FROM keyring WHERE id IN ("_s32);
+                                for (const auto &it : all)
+                                        b->append('\'', escaped_repr(it), "',"_s32);
+
+                                if (b->back() == ',')
+                                {
+                                        static constexpr bool trace{false};
+
+                                        b->pop_back();
+                                        b->append(')');
+
+                                        const auto before = Timings::Microseconds::Tick();
+
+                                        if (!mysql_client.exec_stmt(false, b->data(), b->size()))
+                                        {
+                                                build_response(c, "500 Internal Server Error"_s32);
+                                                return try_flush(c);
+                                        }
+
+                                        auto rows = mysql_client.rows();
+                                        uint64_t iv[2];
+
+                                        if (trace)
+                                                SLog("Took ", duration_repr(Timings::Microseconds::Since(before)), "\n");
+
+                                        const auto before_ = Timings::Microseconds::Tick();
+
+                                        for (auto &&row : rows)
+                                        {
+                                                const auto id = row[0];
+                                                const auto encrypted_wrapping_key = row[1];
+
+                                                build_iv(id, iv);
+
+                                                try
+                                                {
+                                                        // Decrypt the stored WRAPPING key using KMS's encryption key
+                                                        const auto plaintext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}
+                                                                                   .decrypt(encrypted_wrapping_key);
+                                                        const auto wrapping_key = plaintext.as_s32();
+
+                                                        // Provide just the wrapping key back to the client
+                                                        outb->append(id, ' ');
+                                                        Base64::Encode(reinterpret_cast<const uint8_t *>(wrapping_key.data()), wrapping_key.size(), outb);
+                                                        outb->append('\n');
+                                                }
+                                                catch (const std::exception &e)
+                                                {
+                                                        SLog("Failed:", e.what(), "\n");
+                                                }
+                                        }
+
+                                        if (trace)
+                                                SLog("Took ", duration_repr(Timings::Microseconds::Since(before_)), "\n");
+                                }
+                        }
+
+                        c->iov.append("HTTP/1.1 200 OK\r\nServer: "_s32);
+                        c->iov.append(server_name);
+                        c->iov.append("\r\nContent-Type: text/plain\r\n"_s32);
+                        set_response_connection_header(c);
+			maybe_extend_lease(c);
+
+                        const auto content_len = outb->size() - resp_offset;
+
+                        c->iov.append(_S("Content-Length: "));
+
+                        const auto o = outb->size();
+                        outb->append(content_len);
+
+                        c->iov.append_range({o, outb->size() - o});
+                        c->iov.append(_S("\r\n\r\n"));
+
+                        c->iov.append_range({resp_offset, content_len});
+                        return try_flush(c);
                 }
                 else if (path.Eq(_S("/unwrap")))
                 {
@@ -2359,77 +2954,92 @@ l1:
 						return try_flush(c);
 					}
 
+                                	all.insert({objid, wrapped_key_base64});
                                 }
-
-                                all.insert({objid, wrapped_key_base64});
                         }
 
-                        auto b = mysql_client._GetQueryBuffer();
                         auto outb = c->outb ?: (c->outb = new_buf());
                         const auto resp_offset = outb->size();
 
-                        b->clear();
-                        b->append("SELECT id, k FROM phaistos_kms.keyring WHERE id IN ("_s32);
-                        for (const auto &it : all)
-                                b->append('\'', escaped_repr(it.first), "',"_s32);
-
-                        if (b->back() == ',')
+			if (!all.empty())
                         {
-                                b->pop_back();
-                                b->append(')');
+                                auto b = mysql_client.internal_buffer();
 
-                                if (!mysql_client.SendQuery(false, b->data(), b->size()))
+                                b->clear();
+                                b->append("SELECT id, k FROM keyring WHERE id IN ("_s32);
+                                for (const auto &it : all)
+                                        b->append('\'', escaped_repr(it.first), "',"_s32);
+
+                                if (b->back() == ',')
                                 {
-                                        build_response(c, "%00 Internal Server Error"_s32);
-                                        return try_flush(c);
-                                }
+                                        static constexpr bool trace{false};
 
-                                auto rows = mysql_client.rows();
-                                uint64_t iv[2];
+                                        b->pop_back();
+                                        b->append(')');
 
-                                for (auto &&row : rows)
-                                {
-                                        const auto id = row[0];
-                                        const auto encrypted_wrapping_key = row[1];
+                                        const auto before = Timings::Microseconds::Tick();
 
-                                        build_iv(id, iv);
-
-                                        try
+                                        if (!mysql_client.exec_stmt(false, b->data(), b->size()))
                                         {
-                                                // Decrypt the stored WRAPPING key using KMS's encryption key
-                                                const auto plaintext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}
-							.decrypt(encrypted_wrapping_key);
-                                                const auto wrapping_key = plaintext.as_s32();
-
-                                                // Wrapped key is provided in the request(base64 encoded)
-                                                const auto wrapped_key_base64 = all.find(id)->second;
-
-                                                // base64 decode to get the wrapped key(i.e the ciphertext) we will have to unwrap
-                                                base64_buf.clear();
-                                                if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(wrapped_key_base64.data()), wrapped_key_base64.size(), &base64_buf))
-						{
-							build_response(c, "400 Bad Request"_s32);
-							return try_flush(c);
-						}
-
-                                                const auto wrapped_key = base64_buf.as_s32();
-
-                                                // OK, now use the wrapping key to unwrap the provided wrapped key(i.e ciphertext)
-                                                // and send it back to the client as plaintext
-                                                const auto unwrapped_key = switch_security::ciphers::aes256{{reinterpret_cast<const uint8_t *>(wrapping_key.data()), wrapping_key.size()},
-                                                                                                            {reinterpret_cast<const uint8_t *>(iv), 16}}
-                                                                               .decrypt(wrapped_key);
-
-                                                outb->append(id, ' ');
-
-                                                // base64 encode the unwrapped key(i.e the data key)
-                                                Base64::Encode(reinterpret_cast<const uint8_t *>(unwrapped_key.data()), unwrapped_key.size(), outb);
-                                                outb->append('\n');
+                                                build_response(c, "500 Internal Server Error"_s32);
+                                                return try_flush(c);
                                         }
-                                        catch (const std::exception &e)
+
+                                        auto rows = mysql_client.rows();
+                                        uint64_t iv[2];
+
+                                        if (trace)
+                                                SLog("Took ", duration_repr(Timings::Microseconds::Since(before)), "\n");
+
+                                        const auto before_ = Timings::Microseconds::Tick();
+
+                                        for (auto &&row : rows)
                                         {
-                                                SLog("Failed:", e.what(), "\n");
+                                                const auto id = row[0];
+                                                const auto encrypted_wrapping_key = row[1];
+
+                                                build_iv(id, iv);
+
+                                                try
+                                                {
+                                                        // Decrypt the stored WRAPPING key using KMS's encryption key
+                                                        const auto plaintext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}
+                                                                                   .decrypt(encrypted_wrapping_key);
+                                                        const auto wrapping_key = plaintext.as_s32();
+
+                                                        // Wrapped key is provided in the request(base64 encoded)
+                                                        const auto wrapped_key_base64 = all.find(id)->second;
+
+                                                        // base64 decode to get the wrapped key(i.e the ciphertext) we will have to unwrap
+                                                        base64_buf.clear();
+                                                        if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(wrapped_key_base64.data()), wrapped_key_base64.size(), &base64_buf))
+                                                        {
+                                                                build_response(c, "400 Bad Request"_s32);
+                                                                return try_flush(c);
+                                                        }
+
+                                                        const auto wrapped_key = base64_buf.as_s32();
+
+                                                        // OK, now use the wrapping key to unwrap the provided wrapped key(i.e ciphertext)
+                                                        // and send it back to the client as plaintext
+                                                        const auto unwrapped_key = switch_security::ciphers::aes256{{reinterpret_cast<const uint8_t *>(wrapping_key.data()), wrapping_key.size()},
+                                                                                                                    {reinterpret_cast<const uint8_t *>(iv), 16}}
+                                                                                       .decrypt(wrapped_key);
+
+                                                        outb->append(id, ' ');
+
+                                                        // base64 encode the unwrapped key(i.e the data key)
+                                                        Base64::Encode(reinterpret_cast<const uint8_t *>(unwrapped_key.data()), unwrapped_key.size(), outb);
+                                                        outb->append('\n');
+                                                }
+                                                catch (const std::exception &e)
+                                                {
+                                                        SLog("Failed:", e.what(), "\n");
+                                                }
                                         }
+
+                                        if (trace)
+                                                SLog("Took ", duration_repr(Timings::Microseconds::Since(before_)), "\n");
                                 }
                         }
 
@@ -2494,10 +3104,10 @@ l1:
                                 if (false == b->empty())
                                         b->append(" UNION "_s32);
                                 if (props_list.empty())
-                                        b->append("SELECT id, pair_k, pair_v FROM phaistos_kms.secrets WHERE id = '"_s32, key_name, "'");
+                                        b->append("SELECT id, pair_k, pair_v FROM secrets WHERE id = '"_s32, key_name, "'");
                                 else
                                 {
-                                        b->append("SELECT id, pair_k, pair_v FROM phaistos_kms.secrets WHERE id = '"_s32, key_name, "' AND prop_k IN ("_s32);
+                                        b->append("SELECT id, pair_k, pair_v FROM secrets WHERE id = '"_s32, key_name, "' AND prop_k IN ("_s32);
 
                                         for (const auto name : props_list.Split(','))
                                         {
@@ -2522,7 +3132,7 @@ l1:
 
                         if (false == b->empty())
                         {
-                                if (false == mysql_client.SendQuery(false, b->data(), b->size()))
+                                if (false == mysql_client.exec_stmt(false, b->data(), b->size()))
                                 {
                                         build_response(c, "500 Internal Server Error"_s32);
                                         return try_flush(c);
@@ -2593,16 +3203,14 @@ l1:
                         }
 
 
-                        // TODO: authenticate
-
                         mysql_client.begin();
 
-                        auto _b = mysql_client._GetQueryBuffer();
+                        auto _b = mysql_client.internal_buffer();
                         auto _b2{&tbuf};
 			uint8_t iv[16];
 
                         _b->clear();
-                        _b->append("REPLACE INTO phaistos_kms.secrets VALUES "_s32);
+                        _b->append("REPLACE INTO secrets VALUES "_s32);
                         for (const auto line : content.Split('\n'))
                         {
                                 auto[key_name, props_list] = line.Divided(' ');
@@ -2626,7 +3234,7 @@ l1:
 
                                 // Expecting (key, pair)
                                 _b2->clear();
-                                _b2->append("DELETE FROM phaistos_kms.secrets WHERE id = '", escaped_repr(key_name), "' AND pair_k IN ("_s32);
+                                _b2->append("DELETE FROM secrets WHERE id = '", escaped_repr(key_name), "' AND pair_k IN ("_s32);
                                 for (const auto pair : props_list.Split(','))
                                 {
                                         const auto[name, value] = pair.Divided('=');
@@ -2675,7 +3283,7 @@ l1:
                                 {
                                         _b2->pop_back();
 					_b2->append(')');
-                                        if (false == mysql_client.SendQuery(false, _b2->data(), _b2->size()))
+                                        if (false == mysql_client.exec_stmt(false, _b2->data(), _b2->size()))
                                         {
                                                 mysql_client.rollback();
                                                 build_response(c, "500 Internal Server Error"_s32);
@@ -2693,7 +3301,7 @@ l1:
                         if (_b->back() == ',')
                         {
                                 _b->pop_back();
-                                if (false == mysql_client.SendQuery(false, _b->data(), _b->size()))
+                                if (false == mysql_client.exec_stmt(false, _b->data(), _b->size()))
                                 {
                                         mysql_client.rollback();
                                         build_response(c, "500 Internal Server Error"_s32);
@@ -2937,6 +3545,8 @@ l1:
                                         }
 					else if (n.EqNoCase(_S("Authorization")))
                                         {
+						static constexpr bool trace{true};
+
                                                 if (false == secure_enclave.locked)
                                                 {
 							const auto [type, credentials] = v.Divided(' ');
@@ -2944,12 +3554,16 @@ l1:
 							if (type.Eq(_S("KMS")))
                                                         {
                                                                 // If it's locked, we have no way to verify the token
-								Print("Credentials [", credentials, "]\n");
                                                                 try
                                                                 {
                                                                         tbuf.clear();
                                                                         if (Base64::Decode(reinterpret_cast<const uint8_t *>(credentials.data()), credentials.size(), &tbuf) < 1)
+									{
+										if (trace)
+											SLog("Failed to decode base64 [", credentials, "]\n");
+
                                                                                 auth.reset();
+									}
                                                                         else
                                                                         {
                                                                                 uint8_t iv[16];
@@ -2967,7 +3581,10 @@ l1:
                                                                 }
                                                         }
 							else 
-								Print("Unexpected type [", type, "]\n");
+							{
+								if (trace)
+									SLog("Unexpected type [", type, "]\n");
+							}
                                                 }
                                         }
                                 }
@@ -3129,7 +3746,7 @@ l1:
         Switch::SetReusePort(listener, 1);
 
         io_events.insert(listener, POLLIN, &listener);
-        Print("Accepting connections at ", e, "\n");
+        Print("Accepting connections at ", use_http ? "http" : "https", "://", e, "\n");
 
         for (;;)
         {

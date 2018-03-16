@@ -342,6 +342,3 @@ Unseal Progress: 1
 
 ## Quotes
 - "Key Valut streamlines the key management process and enables you to maintain control of keys that access and encrypt your data"
-
-
-
