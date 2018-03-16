@@ -30,7 +30,7 @@
 #endif
 #include <unordered_map>
 
-static constexpr bool dev_mode{true}; // enable it for development
+static constexpr bool dev_mode{false}; // enable it for development
 static constexpr std::size_t max_masterkey_shares{16};
 
 struct authenticated_session
