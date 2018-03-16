@@ -12,6 +12,7 @@ You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in 
 - https://github.com/dsprenkels/sss
 - https://github.com/nlohmann/json
 - https://github.com/Cyan4973/xxHash
+- https://github.com/TartanLlama/optional
 - https://www.openssl.org/
 
         
