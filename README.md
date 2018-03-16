@@ -7,6 +7,8 @@ Phaistos KMS is a very simple to operate, high performance, stateless keys and s
                                         
 KMS is inspired by Google KMS, AWS KMS and Hashicorp's Vault.
 
+Extensive documentation and example use (specifically, for how to encrypt data using keys wrapping) will be provided soon.
+
 ## Building KMS
 You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in a few seconds. The KMS in this repository uses:
 - https://github.com/dsprenkels/sss
@@ -40,7 +42,7 @@ The mySQL endpoint format is  `user[:password@]hostname[:port]/databasename`. Th
                         
                                 
 ## Master Key and Shares         
-When KMS starts, it is in a `sealed state`. The only operation possible while in this state is `/unseal`. KMS cannot decrypt any information persisted unless unsealed first. Unsealing requires reconstruction of the `Master Key`, which in turn is used to decrypt a special KMS key, which is used to encrypt and decrypt keys and secrets. The master keys is not stored anywhere. It can only be derived from the master key shares. As opposed to creating a single master key and trusting a single operator with that key, KMS uses [Shamir's Secret Sharing algorithm](https://en.wikipedia.org/wiki/Shamir%27s_Secret_Sharing) to split the master created during initialisation into 1 or more shares, and trusted operators get exclusive ownership of those shares. Later, to unseal KMS, operators provide shares, in any order, and KMS, once it has enough shares, will reconstruct the master key, and transition to `unsealed` state.
+When KMS starts, it is in a `sealed state`. The only operation possible while in this state is `/unseal`. KMS cannot decrypt any information persisted unless unsealed first. Unsealing requires reconstruction of the `Master Key`, which in turn is used to decrypt a special KMS key, which is used to encrypt and decrypt keys and secrets. The master key is not stored anywhere. It can only be derived from the master key shares. Instead of creating a single master key and trusting a single operator with that key, KMS uses [Shamir's Secret Sharing algorithm](https://en.wikipedia.org/wiki/Shamir%27s_Secret_Sharing) to split the master created during initialisation into 1 or more shares, and trusted operators get exclusive ownership of those shares. Later, to unseal KMS, operators provide shares, in any order, and KMS, once it has enough shares, will reconstruct the master key, and transition to `unsealed` state.
                                 
 ## Initialisation                
 To initialise KMS, which can only be done once, you need to use `kms init <number of shares> <required shares to reconstruct the master key>`. A new master key is created, and then split into the number of shares you specified. KMS will initialise the database, and will then output the shares on screen, as well as a special `root authentication token`. You should then distribute the shares to trusted parties, and store the root token for later use (you should use 1Password or other such utilities to store the shares trusted to you, and the root token). Once KMS is initialised, you will not be able to reinitialise it.
@@ -52,7 +54,6 @@ Create the required mySQL tables.
 mysql -h <mysql_host> -u <mysql_username> --password=<mysql_password> -A <mysql_database>
 mysql> CREATE TABLE `keyring` ( `id` varbinary(128) NOT NULL, `k` varbinary(128) NOT NULL, PRIMARY KEY (`id`) );
 Query OK, 0 rows affected (0.00 sec)
-
 
 mysql> CREATE TABLE `secrets` ( `id` varbinary(250) NOT NULL, `pair_k` varbinary(250) NOT NULL, `pair_v` longblob NOT NULL, PRIMARY KEY (`id`,`pair_k`) );
 Query OK, 0 rows affected (0.00 sec)
