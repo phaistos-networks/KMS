@@ -5,7 +5,7 @@ Phaistos KMS is a very simple to operate, high performance, stateless keys and s
 - You can use it to store, access and erase secrets.
 - You can deploy as many KMS instances as it makes sense for your use case, and use a load balancer to route requests to them. KMS is stateless. The KMS nodes do not need to communicate with each other, so this works great in practice.
                                         
-KMS is inspired by Google KMS, AWS KMS and Hashicorp's Vault.
+KMS is inspired by Google KMS, AWS KMS and Hashicorp's Vault. It implements a subset of the intersection of features found in those, and others like them, services.
 
 Extensive documentation and example use (specifically, for how to encrypt data using keys wrapping) will be provided soon.
 
