@@ -1,5 +1,4 @@
 HOST:=$(shell hostname)
-HOST:=foo
 
 ifeq ($(HOST), origin)
 	# running one our development machine
