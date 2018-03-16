@@ -9,6 +9,7 @@ KMS is inspired by Google KMS, AWS KMS and Hashicorp's Vault. It implements a su
 
 Extensive documentation and example use (specifically, for how to encrypt data using keys wrapping) will be provided soon.
 
+
 ## Building KMS
 You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in a few seconds. The KMS in this repository uses:
 - https://github.com/dsprenkels/sss
@@ -109,6 +110,12 @@ Notice how we used 3 of the seals. In actual use cases, a single operator should
 
 If you have done this correctly, KMS will output `KMS unlocked` in standard output.
 
+## Security
+All data persisted in mySQL are encrypted using a special key created during initialization. 
+That special key("KMS encryption key") is in turn encrypted(wrapped) using the Master Key. The Master Key is not persisted anywhere, it can only be reconstructed by providing enough shards (as specified during initialization). KMS and all files it may access(configuration file, certificate and private key) must be owned by root, and have the right permissions, otherwise KMS will abort immediately. KMS will disable core dumps and will lock KMS process address space so that no potentially sensitive information will be paged out to swap file or device.  
+
+Even if someone accesses the encrypted data persisted in mySQL directly, they cannot be decrypted without access to the encryption key, which in turns requires the Master Key. KMS will only accept requests over HTTPS(unless in development mode, see `-P` option). All data is encrypted using the AES cipher, with 256-bit key sizes. 
+
 
 
 ## Running KMS
@@ -197,3 +204,4 @@ Expects 0 or more lines of `<secret identifier><space><comma separated list of p
 
 - `/set_secrets` 
 Expects 0 or more lines of `<secret identifier><comma separated list of assignments>`, where each assignment is `<property_name><=><base64 representation of value>`. If the value is empty, that property for that secret is deleted, otherwise the value of the secret's property is updated. The response contains no data.
+
