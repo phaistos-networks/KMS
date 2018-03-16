@@ -97,7 +97,8 @@ Accepting connections at https://0.0.0.0:8282
 KMS is now running in unsealed state. To unseal it, using the root token provided during initialisation: 
 
 ```bash
-curl "http://localhost:8282/unseal" -H "Authorization: KMS iiBcRkH4OuardHV9l2JfmxLZiP24MtB513+0AJySKa35GdUymPzO7WT1G3Nkxmwt"  -d 'AQyfyiCT12bfu80igtyKe/cjk1J46121Vq1/8TtwS3mf/prQqpvkLJ4DwOK6+U1ebIXjOjBgVza908tg5kiVWuIKloeeHoUdBfLXDpZDDR2BKKdiKOKl3y0W85aU2HRxNLSlozfojdllw/RTDI+tlIU=
+curl "https://localhost:8282/unseal" -k -H "Authorization: KMS iiBcRkH4OuardHV9l2JfmxLZiP24MtB513+0AJySKa35GdUymPzO7WT1G3Nkxmwt" \
+-d 'AQyfyiCT12bfu80igtyKe/cjk1J46121Vq1/8TtwS3mf/prQqpvkLJ4DwOK6+U1ebIXjOjBgVza908tg5kiVWuIKloeeHoUdBfLXDpZDDR2BKKdiKOKl3y0W85aU2HRxNLSlozfojdllw/RTDI+tlIU=
 Atyq5+yhUFDyxCqUHvIXwe0JJ+VywG81xQW69Atge5YK/prQqpvkLJ4DwOK6+U1ebIXjOjBgVza908tg5kiVWuIKloeeHoUdBfLXDpZDDR2BKKdiKOKl3y0W85aU2HRxNLSlozfojdllw/RTDI+tlIU=
 A67zRZePlFN40d6kFdm4TYzc5Lm6IeZksitTV4eZMaBw/prQqpvkLJ4DwOK6+U1ebIXjOjBgVza908tg5kiVWuIKloeeHoUdBfLXDpZDDR2BKKdiKOKl3y0W85aU2HRxNLSlozfojdllw/RTDI+tlIU='
 ```
