@@ -129,8 +129,8 @@ Examples of key or secret identifiers:
 
 # API
 Almost all requests require authentication using Authorization HTTP header, and almost all of them should be POST requests. Any exceptions will be noted here.
- 
-  - `/create_token`
+
+- `/create_token`  
 This is how you can create new tokens. You need to provide a JSON dictionary in the POST request as the content, and you need to use the root authorization key to authorize the request.
 The JSON dictionary structure should be as follows:
 ```json
@@ -151,45 +151,45 @@ KMS will register the new token and will return the token identifier you can use
  When KMS needs to verify access for a specific key or secret, it will check against all defined domains for the token used in the HTTP authentication, and will determine permissions based on which domains match the key or secret. That means that, for example, you can set read and write permissions for "users/mail/", but only read permissions 
  for "users/"
  
- - `/create_keys`
+- `/create_keys` 
 Excepts 0 or more key identifiers, one per line, in the POST content, and for each such identifier, it will create a new key and associate it with it. The response will contain lines of `<identifier><space><base64 representation of key>` for each identifier specified.
 
-- `/delete_keys`
+ `/delete_keys` 
 Expects 0 or more keys identifiers, one per line, in the POST content. For each such identifier, it will delete the key. It does not return any content in the response.
 
-- `/set_keys`
+- `/set_keys` 
 This is similar to create_keys, except that instead of expecting one key identifier per line, it expects `<key id><space><base64 representation of key>` per line. It will assign the key to the respective key identifier. It does not return any content in the response.
 
-- `/encrypt`
+- `/encrypt` 
 Expects `<key identifier><space><comma separated list of base 64 represented datums>` in a single line. It will encrypt each of those datums using the key identified by the key identifier, and it will return the base64 ciphertext for each of those datums, one per line, in the response.
 
-- `/decrypt`
+- `/decrypt` 
 -Expects `<key identifier><space><comma separated list of base 64 represented datums>` in a single line. It will decrypt each of those datums using the key identified by the key identifier, and it will return the base64 plaintext for each of those datums, one per line, in the response.
 
-- `/seal`
+- `/seal` 
 Will seal KMS. Only HTTP requests authenticated using the root token can seal KMS.
 
-- `/status`
+- `/status` 
 This request can also executed using GET. It returns information about state(sealed, or not) and total shares provided so far.
 
-- `/seal_status`
+- `/seal_status` 
 This request can also be executed using GET. It returns 200 OK if KMS is unsealed, and 418 I am a Teapot if sealed. Useful for health checks.
 
-- `/revoke_token`
+- `/revoke_token` 
 Expects a token in the request content payload. It will delete that token. It will not return any content in the response.
 
-- `/unseal`
+- `/unseal` 
 It expects 0 or more master key seals, one per line. It will verify the seals, and if enough shares have been collected, it will try to unseal KMS. If it doesn't succeed, it will reset the number of seals collected.
 If KMS is unsealed, the response will be "KMS is now UNLOCKED", otherwise, you will get a JSON dictionary with "cnt" as the total shares collected, and "required" as the number of shares required to reconstruct the master key.
 
-- `/get_keys`
+- `/get_keys` 
 Expects 0 or more key identifiers, one per line. KMS will return `<key identifier><space><base64 representation of the key>`  for each such identifier in the response.
 
-- `/unwrap`
+- `/unwrap` 
 Expects 0 or more `<key identifier><space><base64 representation of wrapped key>`, one per line. KMS will attempt to decrypt the wrapped key, and for each identifier, it will return`<key identifier><space><base64 representation of the unwrapped key>`. 
 
-- `/get_secrets`
+- `/get_secrets` 
 Expects 0 or more lines of `<secret identifier><space><comma separated list of properties>`. It will return `<secret name><space><property name><=><base64 representation of property value>` for each of the defined properties.
 
-- `/set_secrets`
+- `/set_secrets` 
 Expects 0 or more lines of `<secret identifier><comma separated list of assignments>`, where each assignment is `<property_name><=><base64 representation of value>`. If the value is empty, that property for that secret is deleted, otherwise the value of the secret's property is updated. The response contains no data.
