@@ -6,6 +6,14 @@ Phaistos KMS is a very simple to operate, high performance, stateless keys and s
 - You can deploy as many KMS instances as it makes sense for your use case, and use a load balancer to route requests to them. KMS is stateless. The KMS nodes do not need to communicate with each other, so this works great in practice.
                                         
 KMS is inspired by Google KMS, AWS KMS and Hashicorp's Vault.
+
+# Building KMS
+You need clang++ 5.0 to compile it. Just type `make` and it should build KMS in a few seconds. The KMS in this repository uses
+- https://github.com/dsprenkels/sss
+- https://github.com/nlohmann/json
+- https://github.com/Cyan4973/xxHash
+- https://www.openssl.org/
+
         
         
 # Keys and Secrets

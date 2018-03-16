@@ -1,7 +1,5 @@
 // KMS: A simple Keys management service
 // (C) Phaistos Networks, S.A.
-//
-// DEPS: https://github.com/dsprenkels/sss, https://github.com/nlohmann/json, https://github.com/nlohmann/json, https://github.com/Cyan4973/xxHash, OpenSSL: https://www.openssl.org/
 #include "sss/sss.h"
 #include <base64.h>
 #include <data.h>
