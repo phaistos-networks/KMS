@@ -154,7 +154,7 @@ KMS will register the new token and will return the token identifier you can use
 - `/create_keys` 
 Excepts 0 or more key identifiers, one per line, in the POST content, and for each such identifier, it will create a new key and associate it with it. The response will contain lines of `<identifier><space><base64 representation of key>` for each identifier specified.
 
- `/delete_keys` 
+- `/delete_keys` 
 Expects 0 or more keys identifiers, one per line, in the POST content. For each such identifier, it will delete the key. It does not return any content in the response.
 
 - `/set_keys` 
