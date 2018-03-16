@@ -31,8 +31,9 @@ endif
 
 all: $(TARGETS)
 
-service: $(EOBJS) service.o
-	$(CC) service.o $(EOBJS) -o kms $(LDFLAGS_SANITY) $(LDFLAGS) -pthread $(LDFLAGS_TLS)  $(MYSQL_LIBS) sss/*.o
+service: $(EOBJS) service.o 
+	make -C sss/ libsss.a
+	$(CC) service.o $(EOBJS) -o kms $(LDFLAGS_SANITY) $(LDFLAGS) -pthread $(LDFLAGS_TLS)  $(MYSQL_LIBS) sss/libsss.a 
 
 client: kms_client.o
 	ar rcs libkms.a kms_client.o

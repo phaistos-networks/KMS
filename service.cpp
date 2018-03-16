@@ -247,6 +247,12 @@ int main(int argc, char *argv[])
                         return false;
                 }
 
+		if (s.st_uid)
+		{
+			Print("Failed to authorize user. ", path, " owner is not root\n");
+			return false;
+		}
+
                 if (s.st_mode & S_IRWXO)
                 {
                         // Others cannot possibly read, write, or execute this binary
@@ -265,6 +271,12 @@ int main(int argc, char *argv[])
                         Print("Failed to authorize user: unable to stat file:", strerror(errno), "\n");
                         return false;
                 }
+
+		if (s.st_uid)
+		{
+			Print("Failed to authorize user. ", path, " owner is not root\n");
+			return false;
+		}
 
                 if (s.st_mode & S_IRWXO)
                 {
@@ -653,7 +665,7 @@ int main(int argc, char *argv[])
         {
                 if (_mc.size() > 255)
                 {
-                        Print("Invalid mySQL endpoint\n");
+                        Print("Invalid mySQL endpoint: ", _mc, "\n");
                         return 1;
                 }
 
@@ -662,7 +674,7 @@ int main(int argc, char *argv[])
 
                 if (!auth || !r)
                 {
-                        Print("Invalid mySQL endpoint\n");
+                        Print("Invalid mySQL endpoint. Expected authentication\n");
                         return 1;
                 }
 
@@ -670,7 +682,7 @@ int main(int argc, char *argv[])
 
                 if (!endpoint || !dbname)
                 {
-                        Print("Invalid mySQL endpoint\n");
+                        Print("Invalid mySQL endpoint. Expecte database name\n");
                         return 1;
                 }
 
@@ -678,9 +690,9 @@ int main(int argc, char *argv[])
                 const uint32_t port = port_repr ? port_repr.as_uint32() : 3306;
                 const auto[username, password] = auth.Divided(':');
 
-                if (!username || !password)
+                if (!username)
                 {
-                        Print("Invalid mySQL endpoint\n");
+                        Print("Invalid mySQL endpoint. Username not specified\n");
                         return 1;
                 }
 
@@ -831,46 +843,54 @@ int main(int argc, char *argv[])
                 wrapping_key_from_master_key(restored_master_key, wrapping_key);
 
                 // Fetch the wrapped key from the backing store
-                if (auto rows = mysql_client.select("SELECT k FROM keyring WHERE id = '*'"_s32); auto &&row = rows.next())
+		try
                 {
-                        if (row[0].size() < 8)
+                        if (auto rows = mysql_client.select("SELECT k FROM keyring WHERE id = '*'"_s32); auto &&row = rows.next())
                         {
-                                // Sanity check
-                                return false;
-                        }
-
-                        const auto wrapped_key = row[0].SuffixFrom(2); // skip encoded (total shares, required shares)
-
-                        try
-                        {
-                                // decrypt wrapped key using the wrapping key to produce the plaintext(which will be the enc_key)
-                                // the iv is derived from the master key
-                                const uint64_t iv[2]{
-                                    FNVHash64(restored_master_key, sss_MLEN),
-                                    XXH64(restored_master_key, sss_MLEN, 5022)};
-                                const auto plaintext = switch_security::ciphers::aes256{{wrapping_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}.decrypt(wrapped_key);
-
-                                if (plaintext.size() != 32)
+                                if (row[0].size() < 8)
                                 {
-                                        Print("Unexpected state: Cowardly rejecting unlock operation (#2)\n");
+                                        // Sanity check
                                         return false;
                                 }
 
-                                memcpy(secure_enclave.enc_key, plaintext.data(), plaintext.size());
-                                secure_enclave.locked = false;
+                                const auto wrapped_key = row[0].SuffixFrom(2); // skip encoded (total shares, required shares)
 
-                                Print(ansifmt::bold, ansifmt::color_green, "KMS unlocked", ansifmt::reset, "\n");
-                                return true;
+                                try
+                                {
+                                        // decrypt wrapped key using the wrapping key to produce the plaintext(which will be the enc_key)
+                                        // the iv is derived from the master key
+                                        const uint64_t iv[2]{
+                                            FNVHash64(restored_master_key, sss_MLEN),
+                                            XXH64(restored_master_key, sss_MLEN, 5022)};
+                                        const auto plaintext = switch_security::ciphers::aes256{{wrapping_key, 32}, {reinterpret_cast<const uint8_t *>(iv), 16}}.decrypt(wrapped_key);
+
+                                        if (plaintext.size() != 32)
+                                        {
+                                                Print("Unexpected state: Cowardly rejecting unlock operation (#2)\n");
+                                                return false;
+                                        }
+
+                                        memcpy(secure_enclave.enc_key, plaintext.data(), plaintext.size());
+                                        secure_enclave.locked = false;
+
+                                        Print(ansifmt::bold, ansifmt::color_green, "KMS unlocked", ansifmt::reset, "\n");
+                                        return true;
+                                }
+                                catch (...)
+                                {
+                                        Print("FAILED to unlock KMS. Unexpected state\n");
+                                        return false;
+                                }
                         }
-                        catch (...)
+                        else
                         {
-                                Print("FAILED to unlock KMS. Unexpected state\n");
+                                Print("Not initialized yet?\n");
                                 return false;
                         }
                 }
-                else
+		catch (...)
                 {
-                        Print("Not initialized yet?\n");
+                        Print("Failed to access `keyring` table. Please make sure you have initialised the mySQL databased used by KMS first.\n");
                         return false;
                 }
         };
@@ -1745,7 +1765,7 @@ int main(int argc, char *argv[])
                         // TODO: verify, for each distinct key, that we can do this
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
@@ -1807,7 +1827,7 @@ int main(int argc, char *argv[])
 
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
@@ -1915,7 +1935,7 @@ int main(int argc, char *argv[])
                         // keyname:s32 SPACE plaintext:base64[,plaintext:base64]...
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
@@ -2010,7 +2030,7 @@ int main(int argc, char *argv[])
                         // 	when you e.g want to unwrap multiple wrapped entity data keys
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
@@ -2763,7 +2783,7 @@ int main(int argc, char *argv[])
                                                 {
                                                         secure_enclave.locked = false;
                                                         secure_enclave.mk_unlock_ctx.reset();
-                                                        build_response(c, "200 OK"_s32, "Vault is now UNLOCKED"_s32);
+                                                        build_response(c, "200 OK"_s32, "KMS is now UNLOCKED"_s32);
                                                         return try_flush(c);
                                                 }
                                         }
@@ -2796,7 +2816,7 @@ int main(int argc, char *argv[])
 
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
@@ -2921,7 +2941,7 @@ int main(int argc, char *argv[])
 
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
@@ -3076,7 +3096,7 @@ int main(int argc, char *argv[])
 
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
@@ -3198,7 +3218,7 @@ int main(int argc, char *argv[])
 
                         if (secure_enclave.locked)
                         {
-                                build_response(c, "403 Forbidden"_s32, "Vault is LOCKED"_s32);
+                                build_response(c, "403 Forbidden"_s32, "KMS is LOCKED"_s32);
                                 return try_flush(c);
                         }
 
