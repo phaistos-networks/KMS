@@ -16,7 +16,7 @@ else
 	CC:=clang
 	CXX:=clang++
 	CC:=$(CXX) # use clang++ for compiling c modules as well, because, syms.resolver
-	CXXFLAGS:=-std=c++1z -Wall  -I./Switch/ -DSWITCH_MIN -Wno-unknown-pragmas -Wno-undefined-inline -Ofast
+	CXXFLAGS:=-std=c++1z -Wall  -I./Switch/ -DSWITCH_MIN -Wno-unknown-pragmas -Wno-undefined-inline #-Ofast
 	CFLAGS:=-xc++ -Ofast
 	LDFLAGS_TLS:=-ldl -lssl -lcrypto
 	LDFLAGS_SANITY:=
