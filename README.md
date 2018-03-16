@@ -121,7 +121,7 @@ Authorization: KMS token
 Almost all requests require authorization. When KMS is initialised, a special root token is created. That is the only token that can be used to access everything, and to create new tokens. To create a new token, you need to use the `/create_token` API.
 
 # Keys and Secrets identifiers
-A key or secret identifier is represented as a path with a ‘/‘ delimiter, and cannot be longer than 64 characters in length. 
+A key or secret identifier is represented as a path with a "/" delimiter, and cannot be longer than 64 characters in length. 
 Examples of key or secret identifiers:
 - users/mail/100
 - products/video_games/ps4/150
@@ -152,19 +152,19 @@ KMS will register the new token and will return the token identifier you can use
  for "users/"
  
  - `/create_keys`
-Excepts 0 or more key identifiers, one per line, in the POST content, and for each such identifier, it will create a new key and associate it with it. The response will contain lines of <identifier><space><base64 representation of key> for each identifier specified.
+Excepts 0 or more key identifiers, one per line, in the POST content, and for each such identifier, it will create a new key and associate it with it. The response will contain lines of `<identifier><space><base64 representation of key>` for each identifier specified.
 
 - `/delete_keys`
 Expects 0 or more keys identifiers, one per line, in the POST content. For each such identifier, it will delete the key. It does not return any content in the response.
 
 - `/set_keys`
-This is similar to create_keys, except that instead of expecting one key identifier per line, it expects <key id><space><base64 representation of key> per line. It will assign the key to the respective key identifier. It does not return any content in the response.
+This is similar to create_keys, except that instead of expecting one key identifier per line, it expects `<key id><space><base64 representation of key>` per line. It will assign the key to the respective key identifier. It does not return any content in the response.
 
 - `/encrypt`
-Expects <key identifier><space><comma separated list of base 64 represented datums> in a single line. It will encrypt each of those datums using the key identified by the key identifier, and it will return the base64 ciphertext for each of those datums, one per line, in the response.
+Expects `<key identifier><space><comma separated list of base 64 represented datums>` in a single line. It will encrypt each of those datums using the key identified by the key identifier, and it will return the base64 ciphertext for each of those datums, one per line, in the response.
 
 - `/decrypt`
--Expects <key identifier><space><comma separated list of base 64 represented datums> in a single line. It will decrypt each of those datums using the key identified by the key identifier, and it will return the base64 plaintext for each of those datums, one per line, in the response.
+-Expects `<key identifier><space><comma separated list of base 64 represented datums>` in a single line. It will decrypt each of those datums using the key identified by the key identifier, and it will return the base64 plaintext for each of those datums, one per line, in the response.
 
 - `/seal`
 Will seal KMS. Only HTTP requests authenticated using the root token can seal KMS.
@@ -183,13 +183,13 @@ It expects 0 or more master key seals, one per line. It will verify the seals, a
 If KMS is unsealed, the response will be "KMS is now UNLOCKED", otherwise, you will get a JSON dictionary with "cnt" as the total shares collected, and "required" as the number of shares required to reconstruct the master key.
 
 - `/get_keys`
-Expects 0 or more key identifiers, one per line. KMS will return <key identifier><space><base64 representation of the key>  for each such identifier in the response.
+Expects 0 or more key identifiers, one per line. KMS will return `<key identifier><space><base64 representation of the key>`  for each such identifier in the response.
 
 - `/unwrap`
-Expects 0 or more <key identifier><space><base64 representation of wrapped key>, one per line. KMS will attempt to decrypt the wrapped key, and for each identifier, it will return <key identifier><space><base64 representation of the unwrapped key>. 
+Expects 0 or more `<key identifier><space><base64 representation of wrapped key>`, one per line. KMS will attempt to decrypt the wrapped key, and for each identifier, it will return`<key identifier><space><base64 representation of the unwrapped key>`. 
 
 - `/get_secrets`
-Expects 0 or more lines of <secret identifier><space><comma separated list of properties>. It will return <secret name><space><property name><=><base64 representation of property value> for each of the defined properties.
+Expects 0 or more lines of `<secret identifier><space><comma separated list of properties>`. It will return `<secret name><space><property name><=><base64 representation of property value>` for each of the defined properties.
 
 - `/set_secrets`
-Expects 0 or more lines of <secret identifier><comma separated list of assignments>, where each assignment is <property_name><=><base64 representation of value>. If  the value is empty, that property for that secret is deleted, otherwise the value of the secret’s property is updated. The response contains no data.
+Expects 0 or more lines of `<secret identifier><comma separated list of assignments>`, where each assignment is `<property_name><=><base64 representation of value>`. If the value is empty, that property for that secret is deleted, otherwise the value of the secret's property is updated. The response contains no data.
