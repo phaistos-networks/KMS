@@ -9,6 +9,7 @@
 class KMSClient final
 {
       private:
+      	uint32_t fault_cnt{0};
         HTTPClient http_client;
 	struct
 	{
@@ -21,6 +22,11 @@ class KMSClient final
 	Buffer auth_token_base64;
 
 
+	private:
+		void configure_http_client();
+
+		void consider_endpoint_activity(const HTTPClient::request *);
+
       public:
         KMSClient(const str_view32 kms_hostname = {"localhost"}, const str_view32 token={})
         {
@@ -28,6 +34,8 @@ class KMSClient final
                 iconv_handle = iconv_open("utf-8", "iso-8859-7");
 		if (token)
 			set_auth_token(token);
+
+		configure_http_client();
         }
 
         ~KMSClient()
