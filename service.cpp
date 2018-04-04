@@ -34,7 +34,7 @@
 #include <system_error>
 #include <unordered_map>
 
-static constexpr bool        dev_mode{true}; // enable it for development
+static constexpr bool        dev_mode{false}; // enable it for development
 static constexpr std::size_t max_masterkey_shares{16};
 
 struct authenticated_session final {
@@ -3319,17 +3319,29 @@ int main(int argc, char *argv[]) {
 
                         c->flags &= ~unsigned(connection::Flags::tls_want_read);
 
-                        // It turns out, we need to keep reading until we have drained the socket buffer
-                        // otherwise we may get X bytes, and SSL_read() reads Y (< X) and obviously we don't
-                        // get another POLLIN (level-triger semantics), so we need to drain it until we are done
-                        // XXX: figure out why this is the case, and what we can do to improve it
-                        for (const auto saved{b->size()};;) {
-                                b->reserve(8192);
 
-                                const auto r = SSL_read(ssl, b->data() + b->size(), b->capacity());
+			// We don't know how much data is in the socket buffer
+			// and FIONREAD won't help us here because the amount of data we read with SSL_read() will not match
+			// the number of bytes in the sockbuf -- because of the SSL encapsulation overhead, so we 'll simply remember the capacity
+			// and if (SSL_read() < saved_capcity && SSL_read < 16k), we won't try to read again. 
+			//
+			// This is important because:
+			// According to https://www.openssl.org/docs/man1.0.2/ssl/SSL_read.html
+			// SSL_read() upto 16K at a time:
+			// > The data are received in records (with a maximum record size of 16kB for SSLv3/TLSv1).
+			if (trace)
+				SLog("Reading\n");
+
+                        for (const auto saved{b->size()};;) {
+				// SSL_read() reads data in records, with a maximum record of 16kB for SSLv3/TLSv1
+				// so we 'll read 16K at a time as well
+                                b->reserve(16 * 1024 + 128);
+
+				const auto saved_capacity{b->capacity()};
+                                const auto r = SSL_read(ssl, b->data() + b->size(), saved_capacity);
 
                                 if (trace)
-                                        SLog("Read ", r, "\n");
+                                        SLog("Read ", r, " ", saved_capacity, "\n");
 
                                 if (r < 0) {
                                         if (const auto reason = SSL_get_error(ssl, r); reason == SSL_ERROR_WANT_READ) {
@@ -3398,6 +3410,11 @@ int main(int argc, char *argv[]) {
                                 }
 
                                 b->advance_size(r);
+
+				if (r < saved_capacity && r != 16 * 1024) { 
+					// see comments above
+					return process_input(c);
+				}
                         }
 
                 } else {
