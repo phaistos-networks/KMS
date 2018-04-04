@@ -19,8 +19,8 @@ namespace switch_security
                 {
                         static void verify_key_iv(const std::size_t key_size, const std::size_t iv_size, const std::size_t input_key_size, const std::size_t input_iv_size)
                         {
-                                expect(input_key_size * (sizeof(uint8_t) << 3) == key_size);
-                                expect(input_iv_size * (sizeof(uint8_t) << 3) == iv_size);
+                                EXPECT(input_key_size * (sizeof(uint8_t) << 3) == key_size);
+                                EXPECT(input_iv_size * (sizeof(uint8_t) << 3) == iv_size);
                         }
 
                         const std::size_t block_size_in_bytes;

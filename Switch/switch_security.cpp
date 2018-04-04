@@ -42,7 +42,7 @@ Buffer switch_security::ciphers::block_cipher::decrypt(const range_base<const ui
         EVP_CIPHER_CTX_free(ctx);
         ctx = nullptr;
 
-        expect(plaintext_len <= size);
+        EXPECT(plaintext_len <= size);
         res.resize(plaintext_len);
         return res;
 }
@@ -98,7 +98,7 @@ Buffer switch_security::ciphers::block_cipher::encrypt(const str_view32 plaintex
         EVP_CIPHER_CTX_free(ctx);
         ctx = nullptr;
 
-        expect(ciphertext_len <= size);
+        EXPECT(ciphertext_len <= size);
         res.resize(ciphertext_len);
         return res;
 }
@@ -163,7 +163,7 @@ switch_security::rsa switch_security::rsa::make_from_pubkcy_pkcs(const uint8_t *
         auto local{r.get()};
         auto res = d2i_RSAPublicKey(&local, &content, len);
 
-        expect(res == local);
+        EXPECT(res == local);
         return rsa(r.release());
 }
 
@@ -173,7 +173,7 @@ switch_security::rsa switch_security::rsa::make_from_privkey_pkcs(const uint8_t 
         auto local{r.get()};
         auto res = d2i_RSAPrivateKey(&local, &content, len);
 
-        expect(res == local);
+        EXPECT(res == local);
         return rsa(r.release());
 }
 

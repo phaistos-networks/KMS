@@ -175,6 +175,6 @@ uint32_t escape_impl(const char *const p, const uint32_t len, char *out, const u
 
         const auto actual = out - base;
 
-        expect(actual <= available);
+        EXPECT(actual <= available);
         return actual;
 }

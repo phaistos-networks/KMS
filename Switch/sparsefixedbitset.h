@@ -98,7 +98,7 @@ class SparseFixedBitSet
         SparseFixedBitSet(const std::size_t len)
             : length(len < 1 ? 1 : len), indices((uint64_t *)calloc(sizeof(uint64_t), block_count()))
         {
-                expect(indices);
+                EXPECT(indices);
                 bits = (bucket *)malloc(sizeof(bucket) * block_count());
                 if (!bits)
                         throw Switch::data_error("Failed to allocate memory");

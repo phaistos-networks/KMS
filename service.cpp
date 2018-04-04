@@ -34,7 +34,7 @@
 #include <system_error>
 #include <unordered_map>
 
-static constexpr bool        dev_mode{false}; // enable it for development
+static constexpr bool        dev_mode{true}; // enable it for development
 static constexpr std::size_t max_masterkey_shares{16};
 
 struct authenticated_session final {
@@ -597,7 +597,9 @@ int main(int argc, char *argv[]) {
                                 madvise(vma.get(), file_size, MADV_SEQUENTIAL | MADV_DONTDUMP);
 
                                 for (const auto s : str_view32(reinterpret_cast<const char *>(vma.get()), file_size).Split('\n')) {
-                                        if (const auto l = s.Divided('#').first.ws_trimmed()) {
+                                        // no longer treating '#' as a comment, because it may be used in a password
+                                        if (const auto l = s.ws_trimmed()) {
+                                                //if (const auto l = s.Divided('#').first.ws_trimmed()) {
                                                 const auto[n, v] = l.Divided('=');
                                                 const auto name  = n.ws_trimmed();
                                                 const auto value = v.ws_trimmed();
@@ -667,7 +669,7 @@ int main(int argc, char *argv[]) {
                 const auto[auth, r] = _mc.as_s32().Divided('@');
 
                 if (!auth || !r) {
-                        Print("Invalid mySQL endpoint. Expected authentication\n");
+                        Print("Invalid mySQL endpoint \"", _mc.as_s32(), "\". Expected authentication\n");
                         return 1;
                 }
 
@@ -3241,7 +3243,7 @@ int main(int argc, char *argv[]) {
                                                 else if (v.EqNoCase(_S("keep-alive")) || v.Eq(_S("keepalive")))
                                                         c->state.cur_req.expect_connection_close = true;
                                         } else if (n.EqNoCase(_S("Authorization"))) {
-                                                static constexpr bool trace{true};
+                                                static constexpr bool trace{false};
 
                                                 if (false == secure_enclave.locked) {
                                                         const auto[type, credentials] = v.Divided(' ');
@@ -3281,6 +3283,11 @@ int main(int argc, char *argv[]) {
         };
 
         const auto process_input = [&](auto c) -> bool {
+                static constexpr bool trace{false};
+
+                if (trace)
+                        SLog("Connection buffer size ", c->inb->size(), "\n");
+
                 if (c->flags & unsigned(connection::Flags::state_have_headers)) {
                         if (!read_content(c))
                                 return false;
@@ -3296,15 +3303,15 @@ int main(int argc, char *argv[]) {
         };
 
         const auto try_read = [&](auto c) {
-                auto b = c->inb;
-                auto fd{c->fd};
-                int  n;
+                static constexpr bool trace{false};
+                auto                  b = c->inb;
+                auto                  fd{c->fd};
+                int                   n;
 
                 if (!b)
                         b = c->inb = new_buf();
 
                 if (auto ssl = c->ssl) {
-                        b->reserve(8192);
                         ERR_clear_error();
 
                         if ((c->flags & unsigned(connection::Flags::tls_want_accept)) && !try_ssl_accept(c))
@@ -3312,54 +3319,87 @@ int main(int argc, char *argv[]) {
 
                         c->flags &= ~unsigned(connection::Flags::tls_want_read);
 
-                        const auto r = SSL_read(ssl, b->data() + b->size(), b->capacity());
+                        // It turns out, we need to keep reading until we have drained the socket buffer
+                        // otherwise we may get X bytes, and SSL_read() reads Y (< X) and obviously we don't
+                        // get another POLLIN (level-triger semantics), so we need to drain it until we are done
+                        // XXX: figure out why this is the case, and what we can do to improve it
+                        for (const auto saved{b->size()};;) {
+                                b->reserve(8192);
 
-                        if (r < 0) {
-                                if (const auto reason = SSL_get_error(ssl, r); reason == SSL_ERROR_WANT_READ) {
-                                        c->flags |= unsigned(connection::Flags::tls_want_read);
-                                        return true;
-                                } else if (reason == SSL_ERROR_WANT_WRITE) {
-                                        c->flags |= unsigned(connection::Flags::tls_want_write);
-                                        poll_out_avail(c);
-                                        return true;
-                                } else if (reason == SSL_ERROR_WANT_ACCEPT) {
-                                        c->flags |= unsigned(connection::Flags::tls_want_accept);
-                                        return true;
-                                } else if (reason == SSL_ERROR_SYSCALL) {
-                                        if (EAGAIN != errno && EINTR != errno) {
+                                const auto r = SSL_read(ssl, b->data() + b->size(), b->capacity());
+
+                                if (trace)
+                                        SLog("Read ", r, "\n");
+
+                                if (r < 0) {
+                                        if (const auto reason = SSL_get_error(ssl, r); reason == SSL_ERROR_WANT_READ) {
+                                                if (trace)
+                                                        SLog("want read ", b->size() - saved, "\n");
+
+                                                c->flags |= unsigned(connection::Flags::tls_want_read);
+                                                return saved != b->size() ? process_input(c) : true;
+                                        } else if (reason == SSL_ERROR_WANT_WRITE) {
+                                                if (trace)
+                                                        SLog("Want write\n");
+
+                                                c->flags |= unsigned(connection::Flags::tls_want_write);
+                                                poll_out_avail(c);
+                                                return saved != b->size() ? process_input(c) : true;
+                                        } else if (reason == SSL_ERROR_WANT_ACCEPT) {
+                                                if (trace)
+                                                        SLog("want accept\n");
+
+                                                c->flags |= unsigned(connection::Flags::tls_want_accept);
+                                                return saved != b->size() ? process_input(c) : true;
+                                        } else if (reason == SSL_ERROR_SYSCALL) {
+                                                if (trace)
+                                                        SLog("syscall\n");
+
+                                                if (EAGAIN != errno && EINTR != errno) {
+                                                        shutdown(c, __LINE__, true);
+                                                        return false;
+                                                } else {
+                                                        if (saved != b->size()) {
+                                                                // got some data
+                                                                return process_input(c);
+                                                        }
+                                                        return true;
+                                                }
+                                        } else if (reason == SSL_ERROR_SSL) {
+                                                if (trace)
+                                                        SLog("SSL error\n");
+
+                                                log_SSL_error(__LINE__);
                                                 shutdown(c, __LINE__, true);
                                                 return false;
-                                        } else
-                                                return true;
-                                } else if (reason == SSL_ERROR_SSL) {
-                                        log_SSL_error(__LINE__);
-                                        shutdown(c, __LINE__, true);
-                                        return false;
-                                } else if (reason != SSL_ERROR_NONE) {
-                                        shutdown(c, __LINE__, true);
-                                        return false;
-                                } else
-                                        return true;
-                        } else if (0 == r) {
-#if 0
-                                if (const auto reason = SSL_get_error(ssl, r); SSL_ERROR_ZERO_RETURN == reason || SSL_ERROR_NONE == reason)
-                                {
-                                        // OK
+                                        } else if (reason == SSL_ERROR_ZERO_RETURN) {
+                                                if (trace)
+                                                        SLog("ZERO RETURN\n");
+
+                                                shutdown(c, __LINE__, false);
+                                                return false;
+                                        } else if (reason != SSL_ERROR_NONE) {
+                                                if (trace)
+                                                        SLog("Other Error\n");
+
+                                                shutdown(c, __LINE__, true);
+                                                return false;
+                                        } else {
+                                                if (trace)
+                                                        SLog("No Error?\n");
+
+                                                return saved != b->size() ? process_input(c) : true;
+                                        }
+                                } else if (0 == r) {
+                                        {
+                                                shutdown(c, __LINE__, false);
+                                                return false;
+                                        }
                                 }
-                                else if (SSL_ERROR_SYSCALL == reason && (0 == errno || EAGAIN == errno || EINTR == errno))
-                                {
-                                        // OK
-                                }
-                                else
-#endif
-                                {
-                                        shutdown(c, __LINE__, false);
-                                        return false;
-                                }
+
+                                b->advance_size(r);
                         }
 
-                        b->advance_size(r);
-                        return process_input(c);
                 } else {
                         if (-1 == ioctl(fd, FIONREAD, &n)) {
                                 // ioctl() is not supposed to fail here
@@ -3474,7 +3514,7 @@ int main(int argc, char *argv[]) {
                         auto c = reinterpret_cast<connection *>(it->data.ptr);
 
                         if (events & (POLLERR | POLLHUP)) {
-                                shutdown(c, __LINE__, true);
+                                shutdown(c, __LINE__, c->inb && !c->inb->empty());
                                 continue;
                         }
 

@@ -20,8 +20,8 @@
 
 #define require(x) assert(x)
 #define Drequire(x) assert(x)
-#define expect(x) assert(x)
-#define Dexpect(x) assert(x)
+#define EXPECT(x) assert(x)
+#define DEXPECT(x) assert(x)
 
 
 [[gnu::noreturn]] static inline void Unreachable()

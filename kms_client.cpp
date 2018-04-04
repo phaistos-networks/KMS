@@ -1,54 +1,43 @@
 #include "kms_client.h"
 #include <dns_client.h>
 
-void KMSClient::consider_endpoint_activity(const HTTPClient::request *const req)
-{
-	[[maybe_unused]] const auto &host = req->connection->endpoint->host;
-	fault_cnt = 0;
+void KMSClient::consider_endpoint_activity(const HTTPClient::request *const req) {
+        [[maybe_unused]] const auto &host = req->connection->endpoint->host;
+        fault_cnt                         = 0;
 }
 
-void KMSClient::configure_http_client()
-{
+void KMSClient::configure_http_client() {
         // We are accesinng KMS instances via a load balancer with a single IP address(endpoint)
         // so if e.g a connection fails because one of the KMS instances is stopped while a connection
         // is being processes, the client will 'forget' the endpoint, which means there will
         // be no other endpoints to connect to(it would have been fine if the client was accessing all
         // different KMS instances individually).
-	//
-	//XXX: The current solution is kind of naive
+        //
+        //XXX: The current solution is kind of naive
         http_client.behavior.addrFallbackProvider = [this](const auto &host, uint32_t *const out) {
                 bool succ;
 
-		if (fault_cnt > 8)
-		{
-			// abort it
-			fault_cnt = 0;
-			return 0;
-		}
-		else if (++fault_cnt > 4)
-		{
-			Timings::Seconds::Sleep(1);
-		}
+                if (fault_cnt > 8) {
+                        // abort it
+                        fault_cnt = 0;
+                        return 0;
+                } else if (++fault_cnt > 4) {
+                        Timings::Seconds::Sleep(1);
+                }
 
-                if (const auto addr4 = URL::ParseHostAddress(host.name, succ); succ)
-                {
+                if (const auto addr4 = URL::ParseHostAddress(host.name, succ); succ) {
                         out[1] = addr4;
                         Timings::Milliseconds::Sleep(100);
                         return 1;
-                }
-                else
-                {
+                } else {
                         static thread_local DNSClient dns_client;
-                        char buf[2048];
+                        char                          buf[2048];
 
-                        if (DNSClient dns_client; const auto *q = dns_client.ResolveByNameEx(host.name, DNSClient::Query::A, buf, 2, sizeof(buf)))
-                        {
+                        if (DNSClient dns_client; const auto *q = dns_client.ResolveByNameEx(host.name, DNSClient::Query::A, buf, 2, sizeof(buf))) {
                                 uint8_t n{0};
 
-                                do
-                                {
-                                        if (q->rType == DNSClient::Query::A && q->rLen == sizeof(uint32_t))
-                                        {
+                                do {
+                                        if (q->rType == DNSClient::Query::A && q->rLen == sizeof(uint32_t)) {
                                                 out[n++] = *reinterpret_cast<const uint32_t *>(q->rVal);
                                         }
 
@@ -63,27 +52,23 @@ void KMSClient::configure_http_client()
         };
 }
 
-void KMSClient::set_kms_endpoint(const str_view32 e)
-{
+void KMSClient::set_kms_endpoint(const str_view32 e) {
         endpoint.port = 8282;
         endpoint.hostname.clear();
-        if (const auto p = e.Search(':'))
-        {
+        if (const auto p = e.Search(':')) {
                 endpoint.port = e.SuffixFrom(p + 1).as_uint32();
                 if (!endpoint.port)
                         throw Switch::data_error("Unexpected endpoint");
 
                 endpoint.hostname.append(e.PrefixUpto(p));
-        }
-        else
+        } else
                 endpoint.hostname.append(e);
 
         if (endpoint.hostname.empty())
                 throw Switch::data_error("Unexpected endpoint");
 }
 
-std::unordered_map<str_view8, str_view8> KMSClient::assign(const std::vector<str_view8> &input)
-{
+std::unordered_map<str_view8, str_view8> KMSClient::assign(const std::vector<str_view8> &input) {
         std::unordered_map<str_view8, str_view8> res;
 
         if (input.empty())
@@ -107,14 +92,13 @@ std::unordered_map<str_view8, str_view8> KMSClient::assign(const std::vector<str
 
                 HTTPClient::BuildHTTPRequestMainHeaders(req, buf);
                 buf->append("X-Auth: PHAISTOS\r\n"_s32);
-                if (!auth_token_base64.empty())
-                {
+                if (!auth_token_base64.empty()) {
                         buf->append("Authorization: KMS "_s32, auth_token_base64.as_s32(), '\n');
                 }
                 buf->append("Content-Length: "_s32);
 
                 const auto clo = buf->size();
-                buf->append("                \r\n\r\n");
+                buf->append("                \r\n\r\n"_s32);
 
                 const auto body_offset = buf->size();
 
@@ -133,30 +117,24 @@ std::unordered_map<str_view8, str_view8> KMSClient::assign(const std::vector<str
 
         api->responseHeadersHandler = [this, &succ](auto req, auto &headers) {
                 consider_endpoint_activity(req);
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         SLog("Unexpected response code for ", *req->url, " ", req->ResponseCode(), "\n");
-                }
-                else
-                {
+                } else {
                         succ = true;
                 }
         };
 
         api->allContentConsumer = [&succ, &res, this](auto req, const auto &content) {
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         return;
                 }
 
-                for (const auto line : content.Split('\n'))
-                {
+                for (const auto line : content.Split('\n')) {
                         const auto[objid, unwrapped_key_base64] = line.Divided(' ');
 
-                        if (objid && unwrapped_key_base64)
-                        {
+                        if (objid && unwrapped_key_base64) {
                                 base64_repr.clear();
                                 Base64::Decode(reinterpret_cast<const uint8_t *>(unwrapped_key_base64.data()), unwrapped_key_base64.size(), &base64_repr);
 
@@ -170,8 +148,7 @@ std::unordered_map<str_view8, str_view8> KMSClient::assign(const std::vector<str
 
         if (!http_client.Submit(req.get()))
                 throw Switch::data_error("Failed to update KMS -- cannot submit URL");
-        else
-        {
+        else {
                 req.release();
                 http_client.Run();
 
@@ -182,8 +159,7 @@ std::unordered_map<str_view8, str_view8> KMSClient::assign(const std::vector<str
         return res;
 }
 
-void KMSClient::erase_keys(const std::vector<str_view8> &input)
-{
+void KMSClient::erase_keys(const std::vector<str_view8> &input) {
         if (input.empty())
                 return;
 
@@ -203,14 +179,13 @@ void KMSClient::erase_keys(const std::vector<str_view8> &input)
         api->requestsBuilder = [this, &input](auto req, auto buf) {
                 HTTPClient::BuildHTTPRequestMainHeaders(req, buf);
                 buf->append("X-Auth: PHAISTOS\r\n"_s32);
-                if (!auth_token_base64.empty())
-                {
+                if (!auth_token_base64.empty()) {
                         buf->append("Authorization: KMS "_s32, auth_token_base64.as_s32(), '\n');
                 }
                 buf->append("Content-Length: "_s32);
 
                 const auto clo = buf->size();
-                buf->append("                \r\n\r\n");
+                buf->append("                \r\n\r\n"_s32);
 
                 const auto body_offset = buf->size();
 
@@ -229,20 +204,16 @@ void KMSClient::erase_keys(const std::vector<str_view8> &input)
 
         api->responseHeadersHandler = [this, &succ](auto req, auto &headers) {
                 consider_endpoint_activity(req);
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         SLog("Unexpected response code for ", *req->url, " ", req->ResponseCode(), "\n");
-                }
-                else
-                {
+                } else {
                         succ = true;
                 }
         };
 
         api->allContentConsumer = [&succ](auto req, const auto &content) {
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         return;
                 }
@@ -250,8 +221,7 @@ void KMSClient::erase_keys(const std::vector<str_view8> &input)
 
         if (!http_client.Submit(req.get()))
                 throw Switch::data_error("Failed to contact KMS -- cannot submit URL");
-        else
-        {
+        else {
                 req.release();
                 http_client.Run();
 
@@ -260,8 +230,7 @@ void KMSClient::erase_keys(const std::vector<str_view8> &input)
         }
 }
 
-std::unordered_map<str_view8, str_view8> KMSClient::get_keys(const std::vector<str_view8> &input)
-{
+std::unordered_map<str_view8, str_view8> KMSClient::get_keys(const std::vector<str_view8> &input) {
         std::unordered_map<str_view8, str_view8> res;
 
         if (input.empty())
@@ -274,9 +243,9 @@ std::unordered_map<str_view8, str_view8> KMSClient::get_keys(const std::vector<s
 
         url.SetPort(endpoint.port);
 
-        auto req = std::make_unique<HTTPClient::request>("POST", url);
-        auto api = req->OwnAPI();
-        bool succ{false};
+        auto   req = std::make_unique<HTTPClient::request>("POST", url);
+        auto   api = req->OwnAPI();
+        bool   succ{false};
         Buffer eb;
 
         allocator.reuse();
@@ -284,14 +253,13 @@ std::unordered_map<str_view8, str_view8> KMSClient::get_keys(const std::vector<s
         api->requestsBuilder = [this, &input](auto req, auto buf) {
                 HTTPClient::BuildHTTPRequestMainHeaders(req, buf);
                 buf->append("X-Auth: PHAISTOS\r\n"_s32);
-                if (!auth_token_base64.empty())
-                {
+                if (!auth_token_base64.empty()) {
                         buf->append("Authorization: KMS "_s32, auth_token_base64.as_s32(), '\n');
                 }
                 buf->append("Content-Length: "_s32);
 
                 const auto clo = buf->size();
-                buf->append("                \r\n\r\n");
+                buf->append("                \r\n\r\n"_s32);
 
                 const auto body_offset = buf->size();
 
@@ -311,31 +279,25 @@ std::unordered_map<str_view8, str_view8> KMSClient::get_keys(const std::vector<s
 
         api->responseHeadersHandler = [this, &succ, &eb](auto req, auto &headers) {
                 consider_endpoint_activity(req);
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         eb.append("rc = ", req->ResponseCode());
                         SLog("Unexpected response code for ", *req->url, " ", req->ResponseCode(), "\n");
-                }
-                else
-                {
+                } else {
                         succ = true;
                 }
         };
 
         api->allContentConsumer = [&succ, &res, this](auto req, const auto &content) {
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         return;
                 }
 
-                for (const auto line : content.Split('\n'))
-                {
+                for (const auto line : content.Split('\n')) {
                         const auto[objid, unwrapped_key_base64] = line.Divided(' ');
 
-                        if (objid && unwrapped_key_base64)
-                        {
+                        if (objid && unwrapped_key_base64) {
                                 base64_repr.clear();
                                 Base64::Decode(reinterpret_cast<const uint8_t *>(unwrapped_key_base64.data()), unwrapped_key_base64.size(), &base64_repr);
 
@@ -349,20 +311,18 @@ std::unordered_map<str_view8, str_view8> KMSClient::get_keys(const std::vector<s
 
         if (!http_client.Submit(req.get()))
                 throw Switch::data_error("Failed to contact KMS -- cannot submit URL");
-        else
-        {
+        else {
                 req.release();
                 http_client.Run();
 
                 if (!succ)
-                        throw Switch::data_error("Failed to interface with KMS:get_keys(", eb.as_s32(), ")");
+                        throw Switch::data_error("Failed to interface with KMS:get_keys(", eb.as_s32(), ") ", input.size(), " keys");
         }
 
         return res;
 }
 
-std::unordered_map<str_view8, str_view8> KMSClient::unwrap(const std::vector<std::pair<str_view8, str_view8>> &input)
-{
+std::unordered_map<str_view8, str_view8> KMSClient::unwrap(const std::vector<std::pair<str_view8, str_view8>> &input) {
         std::unordered_map<str_view8, str_view8> res;
 
         if (input.empty())
@@ -375,9 +335,9 @@ std::unordered_map<str_view8, str_view8> KMSClient::unwrap(const std::vector<std
 
         url.SetPort(endpoint.port);
 
-        auto req = std::make_unique<HTTPClient::request>("POST", url);
-        auto api = req->OwnAPI();
-        bool succ{false};
+        auto   req = std::make_unique<HTTPClient::request>("POST", url);
+        auto   api = req->OwnAPI();
+        bool   succ{false};
         Buffer eb;
 
         allocator.reuse();
@@ -386,19 +346,17 @@ std::unordered_map<str_view8, str_view8> KMSClient::unwrap(const std::vector<std
 
                 HTTPClient::BuildHTTPRequestMainHeaders(req, buf);
                 buf->append("X-Auth: PHAISTOS\r\n"_s32);
-                if (!auth_token_base64.empty())
-                {
+                if (!auth_token_base64.empty()) {
                         buf->append("Authorization: KMS "_s32, auth_token_base64.as_s32(), '\n');
                 }
                 buf->append("Content-Length: "_s32);
 
                 const auto clo = buf->size();
-                buf->append("                \r\n\r\n");
+                buf->append("                \r\n\r\n"_s32);
 
                 const auto body_offset = buf->size();
 
-                for (const auto &it : input)
-                {
+                for (const auto &it : input) {
                         buf->append(it.first, ' ');
 
                         // wrapped key will be base64 encoded
@@ -419,31 +377,25 @@ std::unordered_map<str_view8, str_view8> KMSClient::unwrap(const std::vector<std
 
         api->responseHeadersHandler = [this, &succ, &eb](auto req, auto &headers) {
                 consider_endpoint_activity(req);
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         eb.append("rc = ", req->ResponseCode());
                         SLog("Unexpected response code for ", *req->url, " ", req->ResponseCode(), "\n");
-                }
-                else
-                {
+                } else {
                         succ = true;
                 }
         };
 
         api->allContentConsumer = [&succ, &res, this](auto req, const auto &content) {
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         return;
                 }
 
-                for (const auto line : content.Split('\n'))
-                {
+                for (const auto line : content.Split('\n')) {
                         const auto[objid, unwrapped_key_base64] = line.Divided(' ');
 
-                        if (objid && unwrapped_key_base64)
-                        {
+                        if (objid && unwrapped_key_base64) {
                                 base64_repr.clear();
                                 Base64::Decode(reinterpret_cast<const uint8_t *>(unwrapped_key_base64.data()), unwrapped_key_base64.size(), &base64_repr);
 
@@ -457,20 +409,18 @@ std::unordered_map<str_view8, str_view8> KMSClient::unwrap(const std::vector<std
 
         if (!http_client.Submit(req.get()))
                 throw Switch::data_error("Failed to contact KMS -- cannot submit URL");
-        else
-        {
+        else {
                 req.release();
                 http_client.Run();
 
                 if (!succ)
-                        throw Switch::data_error("Failed to interface with KMS:unwrap(", eb.as_s32(), ")");
+                        throw Switch::data_error("Failed to interface with KMS:unwrap(", eb.as_s32(), ") ", input.size(), " input");
         }
 
         return res;
 }
 
-void KMSClient::set(const std::vector<std::pair<str_view8, str_view8>> &input)
-{
+void KMSClient::set(const std::vector<std::pair<str_view8, str_view8>> &input) {
         if (input.empty())
                 return;
 
@@ -489,20 +439,18 @@ void KMSClient::set(const std::vector<std::pair<str_view8, str_view8>> &input)
                 HTTPClient::BuildHTTPRequestMainHeaders(req, buf);
                 buf->append("X-Auth: PHAISTOS\r\n"_s32);
 
-                if (!auth_token_base64.empty())
-                {
+                if (!auth_token_base64.empty()) {
                         buf->append("Authorization: KMS "_s32, auth_token_base64.as_s32(), '\n');
                 }
 
                 buf->append("Content-Length: "_s32);
 
                 const auto clo = buf->size();
-                buf->append("                \r\n\r\n");
+                buf->append("                \r\n\r\n"_s32);
 
                 const auto body_offset = buf->size();
 
-                for (const auto &it : input)
-                {
+                for (const auto &it : input) {
                         buf->append(it.first, ' ');
 
                         // wrapping key will be base64 encoded
@@ -523,21 +471,17 @@ void KMSClient::set(const std::vector<std::pair<str_view8, str_view8>> &input)
 
         api->responseHeadersHandler = [this, &succ](auto req, auto &headers) {
                 consider_endpoint_activity(req);
-                if (req->ResponseCode() != 200)
-                {
+                if (req->ResponseCode() != 200) {
                         succ = false;
                         SLog("Unexpected response code for ", *req->url, " ", req->ResponseCode(), "\n");
-                }
-                else
-                {
+                } else {
                         succ = true;
                 }
         };
 
         if (!http_client.Submit(req.get()))
                 throw Switch::data_error("Failed to update KMS -- cannot submit URL");
-        else
-        {
+        else {
                 req.release();
                 http_client.Run();
 
@@ -547,16 +491,15 @@ void KMSClient::set(const std::vector<std::pair<str_view8, str_view8>> &input)
 }
 
 #ifdef DBG_KMS_CLIENT
-int main(int argc, char *argv[])
-{
-        uint8_t data_key[32], wrapping_key[32];
-        uint64_t iv[2];
+int main(int argc, char *argv[]) {
+        uint8_t          data_key[32], wrapping_key[32];
+        uint64_t         iv[2];
         const str_view32 data("Lord of the Rings, the return of the King");
         const str_view32 objid("bp.users.64");
 
 #if 1
         {
-                KMSClient client("10.5.5.13:80");
+                KMSClient  client("10.5.5.13:80");
                 const auto res = client.get_keys({"foo/bar"_s8});
 
                 SLog("ddone\n");
@@ -589,8 +532,7 @@ int main(int argc, char *argv[])
 
                 );
 
-                for (const auto &it : res)
-                {
+                for (const auto &it : res) {
                         SLog("Unwrapped ", it.first, " ", it.second.size(), "\n");
                 }
         }
