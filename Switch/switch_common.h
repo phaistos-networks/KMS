@@ -15,7 +15,7 @@
 // http://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html
 // returns true if this is a static const, most likely allocated in RODATA segment
 // This is _very_ useful, for we can check if that's the case and just don't alloc()/copy/free() data instead just point to them
-extern char etext, edata, end;
+extern char etext, edata;
 
 template <typename T>
 [[gnu::always_inline]] inline static bool IsConstant(T *const expr)
@@ -1461,7 +1461,6 @@ constexpr size_t operator"" _len(const char *const, const size_t len)
 #define _S16(s) strwlen16_t(s, STRLEN(s))
 #define _S8(s) strwlen8_t(s, STRLEN(s))
 
-#ifdef LEAN_SWITCH
 namespace std
 {
         template <typename LT, typename CT>
@@ -1481,7 +1480,6 @@ namespace std
                 }
         };
 }
-#endif
 
 template <typename T>
 [[gnu::always_inline]] inline static constexpr int32_t TrivialCmp(const T &a, const T &b)
@@ -1549,23 +1547,3 @@ static inline T decode_pod(const uint8_t *&p) noexcept
 using str_view8 = strwlen8_t;
 using str_view16 = strwlen16_t;
 using str_view32 = strwlen32_t;
-
-namespace std
-{
-        template <typename LT, typename CT>
-        struct hash<strwithlen<LT, CT>>
-        {
-                using argument_type = strwithlen<LT, CT>;
-                using result_type = std::size_t;
-
-                result_type operator()(const argument_type &e) const
-                {
-                        size_t h{2166136261U};
-
-                        for (uint32_t i{0}; i != e.len; ++i)
-                                h = (h * 16777619) ^ e.p[i];
-
-                        return h;
-                }
-        };
-}

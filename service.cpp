@@ -447,7 +447,7 @@ int main(int argc, char *argv[]) {
 
                         uint64_t h = BeginFNVHash64();
 
-                        for (uint32_t i{0}; i != 6; ++i)
+                        for (size_t i{0}; i != 6; ++i)
                                 h = FNVHash64(h, reinterpret_cast<const uint8_t *>(data + i), sizeof(uint64_t));
 
                         h       = FNVHash64(h, enc_key, 32);
@@ -490,7 +490,7 @@ int main(int argc, char *argv[]) {
 
                         uint64_t h = BeginFNVHash64();
 
-                        for (uint32_t i{0}; i != 6; ++i)
+                        for (size_t i{0}; i != 6; ++i)
                                 h = FNVHash64(h, reinterpret_cast<const uint8_t *>(input + i), sizeof(uint64_t));
 
                         h = FNVHash64(h, enc_key, 32);
@@ -522,7 +522,7 @@ int main(int argc, char *argv[]) {
                         const auto base{out};
 
                         out += Text::ToBase(token[0], 60, out);
-                        for (uint32_t i{1}; i != 7; ++i) {
+                        for (size_t i{1}; i != 7; ++i) {
                                 *out++ = '-';
                                 const auto c{out};
 
@@ -981,7 +981,7 @@ int main(int argc, char *argv[]) {
                                 // will be harder for someone to - in theory - guess a share.
 
                                 Print("Root Token: ", wrapped_root_token_base64, "\n");
-                                for (uint32_t i{0}; i != cnt; ++i) {
+                                for (size_t i{0}; i != cnt; ++i) {
                                         repr.clear();
                                         Base64::Encode(reinterpret_cast<const uint8_t *>(shares + i), sss_SHARE_LEN, &repr);
                                         Print("Share ", i, ": ", ansifmt::bold, repr.as_s32(), ansifmt::reset, "\n");
@@ -1449,63 +1449,68 @@ int main(int argc, char *argv[]) {
                 auto                  res        = tokens_map.emplace(account_id, std::unique_ptr<token_props>{});
 
                 if (res.second) {
-                        if (auto rows = mysql_client.select("SELECT iv, domains FROM tokens WHERE id = ", account_id); auto &&row = rows.next()) {
-                                if (row[0].size() != 16) {
-                                        if (trace)
-                                                SLog("Unexpected IV\n");
+                        try {
+                                if (auto rows = mysql_client.select("SELECT iv, domains FROM tokens WHERE id = ", account_id); auto &&row = rows.next()) {
+                                        if (row[0].size() != 16) {
+                                                if (trace)
+                                                        SLog("Unexpected IV\n");
 
-                                        return false;
-                                }
+                                                return false;
+                                        }
 
-                                try {
-                                        const auto                                  plaintext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(row[0].data()), 16}}.decrypt(row[1]);
-                                        std::vector<std::pair<str_view8, uint32_t>> all;
+                                        try {
+                                                const auto                                  plaintext = switch_security::ciphers::aes256{{secure_enclave.enc_key, 32}, {reinterpret_cast<const uint8_t *>(row[0].data()), 16}}.decrypt(row[1]);
+                                                std::vector<std::pair<str_view8, uint32_t>> all;
 
-                                        for (const auto *p = reinterpret_cast<const uint8_t *>(plaintext.data()), *const e = p + plaintext.size(); p != e;) {
-                                                const auto len = decode_pod<uint8_t>(p);
+                                                for (const auto *p = reinterpret_cast<const uint8_t *>(plaintext.data()), *const e = p + plaintext.size(); p != e;) {
+                                                        const auto len = decode_pod<uint8_t>(p);
 
-                                                if (len == 0 || len > 128 || p + len + sizeof(uint32_t) > e) {
+                                                        if (len == 0 || len > 128 || p + len + sizeof(uint32_t) > e) {
+                                                                if (trace)
+                                                                        SLog("Unexpected data\n");
+
+                                                                break;
+                                                        }
+
+                                                        const str_view8 domain(reinterpret_cast<const char *>(p), len);
+
+                                                        p += len;
+
+                                                        const auto perms = decode_pod<uint32_t>(p);
+
                                                         if (trace)
-                                                                SLog("Unexpected data\n");
+                                                                SLog("Got [", domain, "] ", perms, "\n");
 
-                                                        break;
+                                                        all.push_back({domain, perms});
                                                 }
 
-                                                const str_view8 domain(reinterpret_cast<const char *>(p), len);
+                                                if (trace)
+                                                        SLog("total ", all.size(), "\n");
 
-                                                p += len;
+                                                auto tp = std::make_unique<token_props>();
 
-                                                const auto perms = decode_pod<uint32_t>(p);
+                                                tp->last_update = now;
+                                                tp->domains_cnt = all.size();
+                                                tp->domains     = (std::pair<str_view8, uint32_t> *)malloc(sizeof(std::pair<str_view8, uint32_t>) * all.size());
+
+                                                for (size_t i{0}; i != all.size(); ++i) {
+                                                        auto p = static_cast<char *>(malloc(sizeof(char) * all[i].first.size()));
+
+                                                        memcpy(p, all[i].first.data(), all[i].first.size());
+                                                        tp->domains[i] = {{p, all[i].first.size()}, all[i].second};
+                                                }
+
+                                                res.first->second = std::move(tp);
 
                                                 if (trace)
-                                                        SLog("Got [", domain, "] ", perms, "\n");
-
-                                                all.push_back({domain, perms});
+                                                        SLog("AUTH\n");
+                                        } catch (...) {
+                                                return false;
                                         }
-
-                                        if (trace)
-                                                SLog("total ", all.size(), "\n");
-
-                                        auto tp = std::make_unique<token_props>();
-
-                                        tp->last_update = now;
-                                        tp->domains_cnt = all.size();
-                                        tp->domains     = (std::pair<str_view8, uint32_t> *)malloc(sizeof(std::pair<str_view8, uint32_t>) * all.size());
-
-                                        for (uint32_t i{0}; i != all.size(); ++i) {
-                                                auto p = static_cast<char *>(malloc(sizeof(char) * all[i].first.size()));
-
-                                                memcpy(p, all[i].first.data(), all[i].first.size());
-                                                tp->domains[i] = {{p, all[i].first.size()}, all[i].second};
-                                        }
-
-                                        res.first->second = std::move(tp);
-
-                                        if (trace)
-                                                SLog("AUTH\n");
-                                } catch (...) {
-                                        return false;
                                 }
+                        } catch (...) {
+				// mySQL connectivity issues? just fail for now
+				return false;
                         }
                 }
 
@@ -1520,7 +1525,7 @@ int main(int argc, char *argv[]) {
                 const auto props = res.first->second.get();
                 const auto all   = props->domains;
 
-                for (uint32_t i{0}; i != props->domains_cnt; ++i) {
+                for (size_t i{0}; i != props->domains_cnt; ++i) {
                         const auto[domain, permissions] = all[i];
 
                         if (trace)
@@ -2553,7 +2558,7 @@ int main(int argc, char *argv[]) {
                                                 // if we fail, reset state
                                                 sss_Share shares[secure_enclave.mk_unlock_ctx.collected];
 
-                                                for (uint32_t i{0}; i != secure_enclave.mk_unlock_ctx.collected; ++i) {
+                                                for (size_t i{0}; i != secure_enclave.mk_unlock_ctx.collected; ++i) {
                                                         const auto plaintext = switch_security::ciphers::aes256{{secure_enclave.mk_unlock_ctx.enc_key, 32}, {secure_enclave.mk_unlock_ctx.enc_iv, 16}}
                                                                                    .decrypt(secure_enclave.mk_unlock_ctx.shares[i].as_s32());
 
@@ -2778,6 +2783,9 @@ int main(int argc, char *argv[]) {
                                                 const auto id                     = row[0];
                                                 const auto encrypted_wrapping_key = row[1];
 
+						if (trace)
+							SLog("Got encrypted wrapping key of length ", row[1].size(), " for id ", id, "\n");
+
                                                 build_iv(id, iv);
 
                                                 try {
@@ -2789,6 +2797,11 @@ int main(int argc, char *argv[]) {
                                                         // Wrapped key is provided in the request(base64 encoded)
                                                         const auto wrapped_key_base64 = all.find(id)->second;
 
+							if (trace)
+								SLog("wrapped_key_base64 = ", wrapped_key_base64, "\n");
+
+
+
                                                         // base64 decode to get the wrapped key(i.e the ciphertext) we will have to unwrap
                                                         base64_buf.clear();
                                                         if (-1 == Base64::Decode(reinterpret_cast<const uint8_t *>(wrapped_key_base64.data()), wrapped_key_base64.size(), &base64_buf)) {
@@ -2797,6 +2810,9 @@ int main(int argc, char *argv[]) {
                                                         }
 
                                                         const auto wrapped_key = base64_buf.as_s32();
+
+							if (trace)
+								SLog("wrapped_key.size() = ", wrapped_key.size(), "\n");
 
                                                         // OK, now use the wrapping key to unwrap the provided wrapped key(i.e ciphertext)
                                                         // and send it back to the client as plaintext
@@ -3476,7 +3492,11 @@ int main(int argc, char *argv[]) {
 
                         past = now;
                         if (runtime_metrics.if_addr4) {
-                                mysql_client.exec("REPLACE INTO kms_runtime_metrics SET  ip_addr4 = ", runtime_metrics.if_addr4, ", op_create_keys = ", r.create_keys, ", op_delete_keys = ", r.delete_keys, ", op_set_keys = ", r.set_keys, ", op_encrypt = ", r.encrypt, ", op_decrypt = ", r.decrypt, ",op_get_keys = ", r.get_keys, ", op_unwrap = ", r.unwrap, ", op_get_secrets = ", r.get_secrets, ", op_set_secrets = ", r.set_secrets);
+                                try {
+                                        mysql_client.exec("REPLACE INTO kms_runtime_metrics SET  ip_addr4 = ", runtime_metrics.if_addr4, ", op_create_keys = ", r.create_keys, ", op_delete_keys = ", r.delete_keys, ", op_set_keys = ", r.set_keys, ", op_encrypt = ", r.encrypt, ", op_decrypt = ", r.decrypt, ",op_get_keys = ", r.get_keys, ", op_unwrap = ", r.unwrap, ", op_get_secrets = ", r.get_secrets, ", op_set_secrets = ", r.set_secrets);
+                                } catch (...) {
+					// don't bother
+                                }
                         }
                 }
 
