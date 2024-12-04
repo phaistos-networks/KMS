@@ -36,6 +36,7 @@
 
 static constexpr bool        dev_mode{false}; // enable it for development
 static constexpr std::size_t max_masterkey_shares{16};
+static constexpr uint32_t KEEPALIVE_TIMEOUT = 60; // 60 seconds keepalive timeout
 
 struct authenticated_session final {
         uint32_t account_id;
@@ -728,14 +729,18 @@ int main(int argc, char *argv[]) {
                 }
         }
 
-        const auto set_response_connection_header = [](auto c) {
-                // TODO: if (c->inb->offset() == c->inb->size()), we have more requests to processs, so maybe we should shutdown the connection
-                if ((c->flags & unsigned(connection::Flags::shutdown_onflush)) || c->state.cur_req.expect_connection_close) {
-                        c->iov.append("Connection: close\r\n"_s32);
-                        c->flags |= unsigned(connection::Flags::shutdown_onflush);
-                } else
-                        c->iov.append("Connection: keep-alive\r\n"_s32);
-        };
+        void set_connection_headers(connection* c) {
+            if ((c->flags & unsigned(connection::Flags::shutdown_onflush)) || 
+                c->state.cur_req.expect_connection_close) {
+                c->iov.append("Connection: close\r\n"_s32);
+                c->flags |= unsigned(connection::Flags::shutdown_onflush);
+            } else {
+                c->iov.append("Connection: keep-alive\r\n"_s32);
+                // Update last activity timestamp
+                c->last_activity = time(nullptr);
+            }
+        }
+
         std::vector<IOBuffer *> reusable_bufs;
         const auto              new_buf = [&reusable_bufs]() {
                 if (reusable_bufs.empty())
@@ -790,14 +795,14 @@ int main(int argc, char *argv[]) {
                 }
         };
 
-        const auto build_response = [&new_buf, &set_response_connection_header](auto c, const str_view32 resp, const str_view32 msg = {}) {
+        const auto build_response = [&new_buf, &set_connection_headers](auto c, const str_view32 resp, const str_view32 msg = {}) {
                 if (!msg) {
                         c->iov.append("HTTP/1.1 "_s32);
                         c->iov.append(resp);
                         c->iov.append("\r\nContent-Length: 0\r\nServer: "_s32);
                         c->iov.append(server_name);
                         c->iov.append("\r\n");
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         c->iov.append("\r\n"_s32);
                 } else {
                         auto outb = c->outb ?: (c->outb = new_buf());
@@ -814,7 +819,7 @@ int main(int argc, char *argv[]) {
                         c->iov.append("\r\nServer: "_s32);
                         c->iov.append(server_name);
                         c->iov.append("\r\n"_s32);
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         c->iov.append("\r\n"_s32);
 
                         if (IsConstant(msg.data())) {
@@ -1637,7 +1642,7 @@ int main(int argc, char *argv[]) {
                                         c->iov.append("\r\nServer: "_s32);
                                         c->iov.append(server_name);
                                         c->iov.append("\r\n"_s32);
-                                        set_response_connection_header(c);
+                                        set_connection_headers(c);
                                         c->iov.append("\r\n"_s32);
 
                                         c->iov.append_range({co, cl});
@@ -1863,7 +1868,7 @@ int main(int argc, char *argv[]) {
                                 c->iov.append("\r\nContent-Length: "_s32);
                                 c->iov.append_range({clo_offset, outb->size() - clo_offset});
                                 c->iov.append("\r\n"_s32);
-                                set_response_connection_header(c);
+                                set_connection_headers(c);
                                 maybe_extend_lease(c);
                                 c->iov.append("\r\n"_s32);
                                 c->iov.append_range({content_offset, content_length});
@@ -1957,7 +1962,7 @@ int main(int argc, char *argv[]) {
 
                                 c->iov.append_range({cl_offset, outb->size() - cl_offset});
                                 c->iov.append("\r\n"_s32);
-                                set_response_connection_header(c);
+                                set_connection_headers(c);
                                 maybe_extend_lease(c);
                                 c->iov.append("\r\n"_s32);
                                 c->iov.append_range({content_offset, content_len});
@@ -2006,7 +2011,7 @@ int main(int argc, char *argv[]) {
                         outb->append(content_length);
                         c->iov.append_range({clo_offset, outb->size() - clo_offset});
                         c->iov.append("\r\n"_s32);
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         c->iov.append("\r\n"_s32);
 
                         c->iov.append_range({co, content_length});
@@ -2036,7 +2041,7 @@ int main(int argc, char *argv[]) {
                         outb->append(content_length);
                         c->iov.append_range({clo_offset, outb->size() - clo_offset});
                         c->iov.append("\r\n"_s32);
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         c->iov.append("\r\n"_s32);
 
                         c->iov.append_range({co, content_length});
@@ -2307,7 +2312,7 @@ int main(int argc, char *argv[]) {
                         outb->append(bs);
                         c->iov.append_range({co, outb->size() - co});
                         c->iov.append(_S("\r\n"));
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         maybe_extend_lease(c);
                         c->iov.append("\r\n"_s32);
                         c->iov.append_range({bo, bs});
@@ -2511,7 +2516,7 @@ int main(int argc, char *argv[]) {
                         outb->append(bs);
                         c->iov.append_range({co, outb->size() - co});
                         c->iov.append(_S("\r\n"));
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         maybe_extend_lease(c);
                         c->iov.append("\r\n"_s32);
                         c->iov.append_range({bo, bs});
@@ -2687,7 +2692,7 @@ int main(int argc, char *argv[]) {
                         c->iov.append("HTTP/1.1 200 OK\r\nServer: "_s32);
                         c->iov.append(server_name);
                         c->iov.append("\r\nContent-Type: text/plain\r\n"_s32);
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         maybe_extend_lease(c);
 
                         const auto content_len = outb->size() - resp_offset;
@@ -2838,7 +2843,7 @@ int main(int argc, char *argv[]) {
                         c->iov.append("HTTP/1.1 200 OK\r\nServer: "_s32);
                         c->iov.append(server_name);
                         c->iov.append("\r\nContent-Type: text/plain\r\n"_s32);
-                        set_response_connection_header(c);
+                        set_connection_headers(c);
                         maybe_extend_lease(c);
 
                         const auto content_len = outb->size() - resp_offset;
@@ -2947,7 +2952,7 @@ int main(int argc, char *argv[]) {
                                 c->iov.append("\r\nContent-Length: "_s32);
                                 c->iov.append_range({clo, outb->size() - clo});
                                 c->iov.append("\r\n"_s32);
-                                set_response_connection_header(c);
+                                set_connection_headers(c);
                                 maybe_extend_lease(c);
                                 c->iov.append("\r\n"_s32);
                                 c->iov.append_range({bo, content_len});
@@ -3188,7 +3193,6 @@ int main(int argc, char *argv[]) {
                                                                 v.SetEnd(p++);
                                                                 break;
                                                         }
-                                                }
                                                 break;
                                         } else if (*p == '\r' && p[1] == '\n') {
                                                 n.SetEnd(p);
@@ -3567,4 +3571,55 @@ int main(int argc, char *argv[]) {
         }
 
         return 0;
+}
+
+void cleanup_idle_connections(std::vector<connection*>& connections, const uint32_t now) {
+    for (auto it = connections.begin(); it != connections.end();) {
+        auto conn = *it;
+        
+        if (now - conn->last_activity > KEEPALIVE_TIMEOUT) {
+            // Connection has been idle for too long
+            if (conn->ssl)
+                SSL_shutdown(conn->ssl);
+                
+            close(conn->fd);
+            delete conn;
+            it = connections.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void handle_connection_activity(connection* c, const uint32_t now) {
+    c->last_activity = now;
+    
+    // Check if we need to set keep-alive header
+    if (!(c->flags & unsigned(connection::Flags::shutdown_onflush)) && 
+        !c->state.cur_req.expect_connection_close) {
+        c->iov.append("Connection: keep-alive\r\n"_s32);
+    }
+}
+
+void service_main_loop(std::vector<connection*>& connections) {
+    uint32_t last_cleanup = time(nullptr);
+    
+    while (true) {
+        const uint32_t now = time(nullptr);
+        
+        // Check for idle connections every 5 seconds
+        if (now - last_cleanup >= 5) {
+            cleanup_idle_connections(connections, now);
+            last_cleanup = now;
+        }
+        
+        // Process active connections
+        for (auto* conn : connections) {
+            if (process_connection(conn)) {
+                handle_connection_activity(conn, now);
+            }
+        }
+        
+        // ... rest of event loop
+    }
 }
